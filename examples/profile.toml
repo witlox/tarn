@@ -1,0 +1,53 @@
+# Example tarn profile
+#
+# This is what ~/Library/Application Support/tarn/profile.toml looks
+# like after a few sessions of use. Default entries ship with tarn;
+# learned entries are added when you pick "Allow and remember" at
+# a prompt.
+#
+# Edit this file freely — tarn respects your changes. The deny list
+# (SSH keys, AWS credentials, etc.) is compiled into tarn and cannot
+# be overridden here.
+
+[paths.readonly]
+paths = [
+  # Defaults — shipped with tarn
+  "~/.gitconfig",
+  "~/.ssh/known_hosts",
+
+  # Learned — approved during sessions
+  "~/.npmrc", # learned
+  "~/.config/pip/pip.conf", # learned
+  "~/.cargo/config.toml", # learned
+  "~/.config/gh/hosts.yml", # learned
+]
+
+[paths.readwrite]
+paths = [
+  # No defaults. Add paths here if the agent needs to write outside
+  # the workspace. Use sparingly — the workspace itself is always
+  # writable.
+  #
+  # Example: if the agent manages a tool's state file:
+  # "~/.local/share/my-tool/state.json", # learned
+]
+
+[network.allow]
+domains = [
+  # Defaults — shipped with tarn
+  "api.anthropic.com",
+  "github.com",
+  "registry.npmjs.org",
+  "pypi.org",
+  "crates.io",
+
+  # Learned — approved during sessions
+  "api.openai.com", # learned
+  "huggingface.co", # learned
+  "objects.githubusercontent.com", # learned
+  "files.pythonhosted.org", # learned
+  "static.crates.io", # learned
+  "index.crates.io", # learned
+  "proxy.golang.org", # learned
+  "sum.golang.org", # learned
+]

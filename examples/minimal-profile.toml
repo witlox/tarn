@@ -1,0 +1,27 @@
+# Minimal tarn profile — strict starting point
+#
+# Use this as a template for security-sensitive projects where you
+# want to start from zero and approve everything explicitly.
+#
+# Copy to: ~/Library/Application Support/tarn/profile.toml
+# Or use: tarn run ~/repos/project --profile ./minimal-profile.toml
+
+[paths.readonly]
+paths = [
+  # Only git config — nothing else pre-approved
+  "~/.gitconfig",
+]
+
+[paths.readwrite]
+paths = [
+  # Empty — the agent can only write to the workspace
+]
+
+[network.allow]
+domains = [
+  # Only the agent's own API — no package registries pre-approved
+  # Uncomment the one that matches your agent:
+  # "api.anthropic.com",
+  # "api.openai.com",
+  # "generativelanguage.googleapis.com",
+]

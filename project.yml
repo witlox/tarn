@@ -1,0 +1,123 @@
+name: Tarn
+options:
+  bundleIdPrefix: com.witlox.tarn
+  deploymentTarget:
+    macOS: "14.0"
+  xcodeVersion: "16.0"
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.10"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+
+packages:
+  ArgumentParser:
+    url: https://github.com/apple/swift-argument-parser.git
+    from: "1.3.0"
+
+targets:
+
+  # Shared policy library — pure Foundation, no system framework deps
+  TarnCore:
+    type: framework
+    platform: macOS
+    sources:
+      - path: Sources/TarnCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.witlox.tarn.core
+        SKIP_INSTALL: "YES"
+
+  # Unprivileged CLI
+  TarnCLI:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Sources/TarnCLI
+    dependencies:
+      - target: TarnCore
+      - package: ArgumentParser
+    settings:
+      base:
+        PRODUCT_NAME: tarn
+        PRODUCT_BUNDLE_IDENTIFIER: com.witlox.tarn.cli
+
+  # System extension: ES client + NEFilterDataProvider + XPC service
+  TarnSupervisor:
+    type: system-extension
+    platform: macOS
+    sources:
+      - path: Sources/TarnSupervisor
+    dependencies:
+      - target: TarnCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.witlox.tarn.supervisor
+        CODE_SIGN_ENTITLEMENTS: Resources/TarnSupervisor.entitlements
+        SYSTEM_EXTENSION_API_USAGE: "YES"
+    info:
+      path: Resources/TarnSupervisor-Info.plist
+      properties:
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.filter-data
+          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).NetworkFilter"
+        NetworkExtension:
+          NEFilterDataProviderDesignatedRequirement: >
+            identifier "com.witlox.tarn.supervisor"
+            and anchor apple generic
+
+  # Host app bundle (LSUIElement, no UI)
+  TarnApp:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources/TarnApp
+    dependencies:
+      - target: TarnCore
+      - target: TarnSupervisor
+        embed: true
+        codeSign: true
+        buildPhase:
+          copyFiles:
+            destination: systemExtensionsPlugins
+    settings:
+      base:
+        PRODUCT_NAME: Tarn
+        PRODUCT_BUNDLE_IDENTIFIER: com.witlox.tarn
+        CODE_SIGN_ENTITLEMENTS: Resources/TarnApp.entitlements
+        INFOPLIST_FILE: Resources/TarnApp-Info.plist
+    info:
+      path: Resources/TarnApp-Info.plist
+      properties:
+        LSUIElement: true
+        CFBundleDisplayName: Tarn
+        LSMinimumSystemVersion: "14.0"
+
+  # Unit tests — TarnCore policy logic (runs via swift test or xcodebuild test)
+  TarnCoreTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/TarnCoreTests
+    dependencies:
+      - target: TarnCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.witlox.tarn.core-tests
+
+  # Integration tests — Level 2: requires SIP-disabled VM with
+  # the system extension installed. Spawns a child process and
+  # verifies that ES/NE intercept and prompt correctly.
+  TarnIntegrationTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests/TarnIntegrationTests
+    dependencies:
+      - target: TarnCore
+      - target: TarnApp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.witlox.tarn.integration-tests
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Tarn.app/Contents/MacOS/Tarn"

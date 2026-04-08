@@ -1,0 +1,14 @@
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+Package.resolved
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.tarn-profile.bak
