@@ -76,6 +76,11 @@ targets:
     platform: macOS
     sources:
       - path: Sources/TarnApp
+      - path: Resources/Assets.xcassets
+        buildPhase: resources
+    settings:
+      base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     dependencies:
       - target: TarnCore
       - target: TarnSupervisor
