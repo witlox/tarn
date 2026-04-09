@@ -3,6 +3,10 @@
 DEVELOPER_DIR ?= /Applications/Xcode.app/Contents/Developer
 export DEVELOPER_DIR
 
+# Set TEAM_ID via environment or command line:
+#   make install-dev TEAM_ID=XXXXXXXXXX
+TEAM_ID ?=
+
 VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo "dev")
 BUILD_DIR := .build/release-app
 DMG_NAME := Tarn-$(VERSION).dmg
@@ -29,17 +33,20 @@ clean:
 project:
 	xcodegen generate
 
-# Build and ad-hoc sign for local development on a SIP-disabled machine.
-# No entitlements, no Developer ID, no notarization needed.
+# Build for local development. Uses automatic signing — Xcode picks
+# up the provisioning profiles you installed from the developer portal.
+# On a SIP-disabled machine, the system extension loads without
+# notarization. On a normal machine, you need `make release` instead.
 install-dev: project
+	@test -n "$(TEAM_ID)" || (echo "Set TEAM_ID: make install-dev TEAM_ID=XXXXXXXXXX" && exit 1)
 	mkdir -p $(BUILD_DIR)
 	xcodebuild build \
 		-project Tarn.xcodeproj \
 		-scheme TarnApp \
 		-configuration Debug \
 		-derivedDataPath $(BUILD_DIR)/DerivedData \
-		CODE_SIGN_IDENTITY="-" \
-		CODE_SIGNING_ALLOWED=YES
+		DEVELOPMENT_TEAM=$(TEAM_ID) \
+		CODE_SIGN_IDENTITY="Developer ID Application"
 	$(eval APP := $(shell find $(BUILD_DIR)/DerivedData -name "Tarn.app" -type d | head -1))
 	@echo ""
 	@echo "Built: $(APP)"
@@ -52,12 +59,14 @@ install-dev: project
 #   - Developer ID Application certificate in keychain
 #   - Apple-granted entitlements (only needed for SIP-enabled machines)
 release: project
+	@test -n "$(TEAM_ID)" || (echo "Set TEAM_ID: make release TEAM_ID=XXXXXXXXXX" && exit 1)
 	mkdir -p $(BUILD_DIR)
 	xcodebuild build \
 		-project Tarn.xcodeproj \
 		-scheme TarnApp \
 		-configuration Release \
 		-derivedDataPath $(BUILD_DIR)/DerivedData \
+		DEVELOPMENT_TEAM=$(TEAM_ID) \
 		CODE_SIGN_IDENTITY="Developer ID Application" \
 		OTHER_CODE_SIGN_FLAGS="--timestamp --options runtime"
 	$(eval APP := $(shell find $(BUILD_DIR)/DerivedData -name "Tarn.app" -type d | head -1))

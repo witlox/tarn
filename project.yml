@@ -28,6 +28,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.witlox.tarn.core
         SKIP_INSTALL: "YES"
+        GENERATE_INFOPLIST_FILE: "YES"
 
   # Unprivileged CLI
   TarnCLI:
@@ -55,6 +56,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.witlox.tarn.supervisor
         CODE_SIGN_ENTITLEMENTS: Resources/TarnSupervisor.entitlements
+        CODE_SIGN_STYLE: Manual
+        PROVISIONING_PROFILE_SPECIFIER: Tarn Supervisor
         SYSTEM_EXTENSION_API_USAGE: "YES"
     info:
       path: Resources/TarnSupervisor-Info.plist
@@ -86,6 +89,8 @@ targets:
         PRODUCT_NAME: Tarn
         PRODUCT_BUNDLE_IDENTIFIER: com.witlox.tarn
         CODE_SIGN_ENTITLEMENTS: Resources/TarnApp.entitlements
+        CODE_SIGN_STYLE: Manual
+        PROVISIONING_PROFILE_SPECIFIER: Tarn App
         INFOPLIST_FILE: Resources/TarnApp-Info.plist
     info:
       path: Resources/TarnApp-Info.plist
@@ -94,7 +99,7 @@ targets:
         CFBundleDisplayName: Tarn
         LSMinimumSystemVersion: "14.0"
 
-  # Unit tests — TarnCore policy logic (runs via swift test or xcodebuild test)
+  # Unit tests
   TarnCoreTests:
     type: bundle.unit-test
     platform: macOS
@@ -106,9 +111,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.witlox.tarn.core-tests
 
-  # Integration tests — Level 2: requires SIP-disabled VM with
-  # the system extension installed. Spawns a child process and
-  # verifies that ES/NE intercept and prompt correctly.
+  # Integration tests (SIP-disabled VM)
   TarnIntegrationTests:
     type: bundle.unit-test
     platform: macOS
