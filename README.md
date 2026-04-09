@@ -2,6 +2,7 @@
 
 [![Test](https://github.com/witlox/tarn/actions/workflows/test.yml/badge.svg)](https://github.com/witlox/tarn/actions/workflows/test.yml)
 [![Lint](https://github.com/witlox/tarn/actions/workflows/lint.yml/badge.svg)](https://github.com/witlox/tarn/actions/workflows/lint.yml)
+[![codecov](https://codecov.io/gh/witlox/tarn/graph/badge.svg)](https://codecov.io/gh/witlox/tarn)
 [![Swift 5.10](https://img.shields.io/badge/Swift-5.10-orange.svg)](https://swift.org)
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-blue.svg)](https://developer.apple.com/macos/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
