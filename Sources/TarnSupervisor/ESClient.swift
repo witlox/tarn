@@ -22,8 +22,8 @@ final class ESClient {
 
         let result = es_new_client(&newClient) { [weak self] _, message in
             guard let self = self else {
-                if message.pointee.event_type == ES_EVENT_TYPE_AUTH_OPEN, let c = newClient {
-                    es_respond_auth_result(c, message, ES_AUTH_RESULT_ALLOW, false)
+                if message.pointee.event_type == ES_EVENT_TYPE_AUTH_OPEN, let client = newClient {
+                    es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
                 }
                 return
             }

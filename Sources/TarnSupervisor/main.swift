@@ -1,15 +1,15 @@
 import Foundation
 import NetworkExtension
 
-/// System extension entry point. The extension hosts both the Endpoint
-/// Security client (file/process supervision) and the NEFilterDataProvider
-/// (network supervision). It listens for XPC connections from the CLI and
-/// coordinates the supervised process tree, session cache, and profile
-/// across both subsystems.
-///
-/// In production, this is launched by macOS as a launchd-managed daemon
-/// after the user approves the system extension in System Settings.
-/// For development on a SIP-disabled machine, it can be run directly.
+// System extension entry point. The extension hosts both the Endpoint
+// Security client (file/process supervision) and the NEFilterDataProvider
+// (network supervision). It listens for XPC connections from the CLI and
+// coordinates the supervised process tree, session cache, and profile
+// across both subsystems.
+//
+// In production, this is launched by macOS as a launchd-managed daemon
+// after the user approves the system extension in System Settings.
+// For development on a SIP-disabled machine, it can be run directly.
 
 // The NEProvider (NEFilterDataProvider) is instantiated by the NE
 // framework; it does not need a manual `main` entry point in the

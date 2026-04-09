@@ -115,9 +115,9 @@ extension XPCService: NSXPCListenerDelegate {
         // Get our own team ID
         var selfCode: SecCode?
         guard SecCodeCopySelf([], &selfCode) == errSecSuccess,
-              let self_ = selfCode else { return false }
+              let ownCode = selfCode else { return false }
         var selfInfo: CFDictionary?
-        guard SecCodeCopySigningInformation(self_, [], &selfInfo) == errSecSuccess,
+        guard SecCodeCopySigningInformation(ownCode, [], &selfInfo) == errSecSuccess,
               let selfDict = selfInfo as? [String: Any],
               let selfTeam = selfDict[kSecCodeInfoTeamIdentifier as String] as? String else {
             // If we can't determine our own team ID (SIP-disabled dev),

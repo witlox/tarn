@@ -252,9 +252,9 @@ public struct Config {
         lines.append("# Learned entries are added when you approve access with 'remember'.")
         lines.append("")
 
-        func escaped(_ s: String) -> String {
-            s.replacingOccurrences(of: "\\", with: "\\\\")
-             .replacingOccurrences(of: "\"", with: "\\\"")
+        func escaped(_ value: String) -> String {
+            value.replacingOccurrences(of: "\\", with: "\\\\")
+                 .replacingOccurrences(of: "\"", with: "\\\"")
         }
 
         lines.append("[paths.readonly]")
