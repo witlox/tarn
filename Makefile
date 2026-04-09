@@ -29,12 +29,28 @@ clean:
 project:
 	xcodegen generate
 
-# Build the signed Tarn.app via xcodebuild.
+# Build and ad-hoc sign for local development on a SIP-disabled machine.
+# No entitlements, no Developer ID, no notarization needed.
+install-dev: project
+	mkdir -p $(BUILD_DIR)
+	xcodebuild build \
+		-project Tarn.xcodeproj \
+		-scheme TarnApp \
+		-configuration Debug \
+		-derivedDataPath $(BUILD_DIR)/DerivedData \
+		CODE_SIGN_IDENTITY="-" \
+		CODE_SIGNING_ALLOWED=YES
+	$(eval APP := $(shell find $(BUILD_DIR)/DerivedData -name "Tarn.app" -type d | head -1))
+	@echo ""
+	@echo "Built: $(APP)"
+	@echo "To activate the system extension on a SIP-disabled machine:"
+	@echo "  sudo systemextensionsctl developer on"
+	@echo "  open $(APP)"
+
+# Build the signed Tarn.app for distribution via xcodebuild.
 # Prerequisites:
-#   - Xcode project generated (make project)
 #   - Developer ID Application certificate in keychain
-#   - Apple-granted entitlements: endpoint-security.client +
-#     content-filter-provider-systemextension
+#   - Apple-granted entitlements (only needed for SIP-enabled machines)
 release: project
 	mkdir -p $(BUILD_DIR)
 	xcodebuild build \
