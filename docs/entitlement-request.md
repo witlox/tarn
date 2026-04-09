@@ -1,20 +1,35 @@
-# Requesting Apple Restricted Entitlements
+# Entitlements and Signing Setup
 
-This guide covers the one-time Apple approval process needed to distribute
-tarn to machines with SIP enabled. If you're only running tarn on your own
-SIP-disabled machine, none of this is needed.
+This guide covers the setup needed to distribute tarn to machines with
+SIP enabled. If you're only running tarn on your own SIP-disabled
+machine, none of this is needed — `make install-dev` works without
+any Apple provisioning.
+
+## What's restricted and what isn't
+
+| Entitlement | Restricted? | Process |
+|---|---|---|
+| Network Extension content filter (`content-filter-provider-systemextension`) | **No** | Enable capability on App ID, create provisioning profile, sign |
+| Endpoint Security (`endpoint-security.client`) | **Yes** | Submit request form, wait for Apple review (1-5 business days) |
+
+The NE content filter entitlement was restricted before November 2016
+but hasn't been since. Per Quinn "The Eskimo!" on the Apple Developer
+Forums: "Any developer can now use the Network Extension provider
+capability like they would any other capability." The only NE
+entitlements that still require Apple approval are Hotspot Helper and
+App Push Provider — content filter is not one of them.
 
 ## Prerequisites
 
 - Paid Apple Developer Program membership ($99/yr)
-- A "Developer ID Application" certificate (created in the developer portal
-  or via Xcode → Settings → Accounts → Manage Certificates)
+- A "Developer ID Application" certificate (created in the developer
+  portal or via Xcode → Settings → Accounts → Manage Certificates)
 
 ## Step 1: Register App IDs (self-service, instant)
 
 Go to: https://developer.apple.com/account/resources/identifiers/list
 
-Click the **+** button to register a new App ID. Do this twice:
+Click **+** to register a new App ID. Do this twice:
 
 ### App ID 1: Host app
 
@@ -26,7 +41,7 @@ Click the **+** button to register a new App ID. Do this twice:
 | Bundle ID | Explicit: `com.witlox.tarn` |
 
 Under **Capabilities**, enable:
-- **System Extension** (check the box)
+- **System Extension**
 
 Click Continue → Register.
 
@@ -40,87 +55,82 @@ Click Continue → Register.
 | Bundle ID | Explicit: `com.witlox.tarn.supervisor` |
 
 Under **Capabilities**, enable:
-- **Network Extensions** (check the box)
-
-After checking Network Extensions, a sub-menu appears. Select:
-- **Content Filter Provider**
+- **Network Extensions**
+- **System Extension**
 
 Click Continue → Register.
 
-## Step 2: Request Endpoint Security entitlement (Apple review)
+## Step 2: Create provisioning profiles (self-service, instant)
+
+Go to: https://developer.apple.com/account/resources/profiles/list
+
+Click **+** to create a new profile. Do this twice:
+
+### Profile 1: Host app
+
+| Field | Value |
+|---|---|
+| Type | Developer ID |
+| App ID | Tarn (`com.witlox.tarn`) |
+| Certificate | your Developer ID Application certificate |
+
+Download the `.provisionprofile` file.
+
+### Profile 2: System extension
+
+| Field | Value |
+|---|---|
+| Type | Developer ID |
+| App ID | Tarn Supervisor (`com.witlox.tarn.supervisor`) |
+| Certificate | your Developer ID Application certificate |
+
+Download the `.provisionprofile` file. This profile automatically
+includes the `content-filter-provider-systemextension` entitlement
+because you enabled Network Extensions on the App ID.
+
+Install both profiles by double-clicking them (they go into
+`~/Library/MobileDevice/Provisioning Profiles/`).
+
+## Step 3: Request Endpoint Security entitlement (Apple review)
+
+This is the only restricted entitlement. The NE content filter does
+NOT need a separate request.
 
 Go to: https://developer.apple.com/contact/request/system-extension/
 
-Fill in the form:
-
 | Field | What to write |
 |---|---|
-| Company / Developer Name | *(your name or company as registered in the developer program)* |
+| Company / Developer Name | *(your name as registered in the developer program)* |
 | App Name | Tarn |
 | Bundle ID | `com.witlox.tarn.supervisor` |
 | System Extension Type | Endpoint Security |
 | Entitlement requested | `com.apple.developer.endpoint-security.client` |
-| Description of functionality | Tarn is a permission supervisor for AI coding agents on macOS. It uses the Endpoint Security framework to intercept file access (AUTH_OPEN) from a supervised process tree, check access against a user-maintained whitelist, and prompt the user to allow or deny unknown access patterns. It also subscribes to NOTIFY_FORK and NOTIFY_EXIT events to maintain the supervised process tree. The tool is agent-agnostic and supervises only the processes launched by the user through the tarn CLI. |
-| Why a system extension | Endpoint Security AUTH events are only available to system extensions. The tool needs pre-execution interception of file opens to enforce the user's whitelist before the supervised process can read or write the file. |
+| Description | Tarn is a permission supervisor for AI coding agents on macOS. It uses Endpoint Security AUTH_OPEN events to intercept file access from a supervised process tree, checks each access against a user-maintained whitelist and a compiled-in credential deny list, and prompts the user to allow or deny. It subscribes to NOTIFY_FORK and NOTIFY_EXIT to track the agent's subprocess tree. Only the agent's processes are supervised; all other system processes are allowed unconditionally. |
+| Why a system extension | Endpoint Security AUTH events require a system extension. The tool needs pre-execution interception of file opens to enforce the whitelist before the supervised process can read or write the file. |
 | Distribution method | Developer ID (outside the Mac App Store) |
-| Link to website or documentation | https://github.com/witlox/tarn |
+| URL | https://github.com/witlox/tarn |
 
-Submit the form.
+Submit and wait for Apple's email (typically 1-5 business days).
 
-## Step 3: Request Network Extension content filter entitlement (Apple review)
+## After ES approval
 
-Go to: https://developer.apple.com/contact/request/network-extension/
-
-Fill in the form:
-
-| Field | What to write |
-|---|---|
-| Company / Developer Name | *(same as above)* |
-| App Name | Tarn |
-| Bundle ID | `com.witlox.tarn.supervisor` |
-| Network Extension Type | Content Filter Provider (System Extension) |
-| Entitlement requested | `com.apple.developer.networking.networkextension` with value `content-filter-provider-systemextension` |
-| Description of functionality | Tarn uses a NEFilterDataProvider to intercept outbound network connections from a supervised AI coding agent's process tree. It identifies the source process by audit token, extracts the destination hostname from the flow's remoteHostname property (with TLS SNI as a fallback), and checks the hostname against a user-maintained domain whitelist. Unknown connections are paused (pauseVerdict) while the user is prompted to allow or deny. The filter only inspects flows from the supervised process tree; all other system traffic is allowed unconditionally. |
-| Why a content filter | The tool needs per-process, per-flow network access control that operates at the connect() level with hostname visibility. This is only possible via NEFilterDataProvider. DNS-level filtering (NEDNSProxyProvider) is explicitly avoided to coexist with user-installed DNS filters like AdGuard. |
-| Distribution method | Developer ID (outside the Mac App Store) |
-| Link to website or documentation | https://github.com/witlox/tarn |
-
-Submit the form.
-
-## What happens next
-
-- Apple reviews each request independently
-- Typical turnaround: 1-5 business days (can be longer)
-- You'll receive an email per request: approved or follow-up questions
-- Once approved, the entitlement is provisioned on your Developer ID
-  certificate — you don't need to download anything new
-- After both are approved, `codesign` with your Developer ID will
-  accept the entitlements in `Resources/TarnSupervisor.entitlements`
-
-## After approval
+Once Apple grants the Endpoint Security entitlement:
 
 ```bash
-# Verify the entitlements work
-make release
+make release    # xcodebuild with Developer ID signing
+make dmg        # package into drag-to-install DMG
+make notarize   # submit to Apple for notarization (uses API key)
 
-# If codesign succeeds, package and notarize
-make dmg
-NOTARIZE_KEY=~/keys/AuthKey_XXXX.p8 \
-NOTARIZE_KEY_ID=XXXXXXXXXX \
-NOTARIZE_ISSUER=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx \
-  make notarize
-
-# Create a GitHub release
 gh release create v0.1.0 .build/release-app/Tarn-v0.1.0.dmg
 ```
 
-## Common rejection reasons
+## While waiting for ES approval
 
-- **Vague description**: Apple wants to know exactly which ES event types
-  and NE provider methods you use. The descriptions above are specific.
-- **No website**: having a public GitHub repo with documentation helps.
-- **Wrong bundle ID**: make sure the bundle ID on the form matches the
-  one in the entitlements file and the App ID registration exactly.
-- **Missing App ID capabilities**: the App ID must have System Extension
-  and/or Network Extensions enabled before the entitlement request.
-  Register the App IDs (Step 1) before submitting the requests.
+The NE content filter works without the ES entitlement. You can build,
+sign, and test the network supervision side immediately. File
+supervision (ES) will fail to initialize until the entitlement is
+granted — the supervisor logs a clear error and continues with
+network-only supervision.
+
+For full development (both ES + NE), use a SIP-disabled machine:
+`make install-dev` — no entitlements or provisioning needed at all.
