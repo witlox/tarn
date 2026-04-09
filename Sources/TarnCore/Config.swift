@@ -21,8 +21,8 @@ public struct AccessRequest {
     /// Session-cache key. Tilde-expanded path for files, "host:<target>" for network.
     public var cacheKey: String {
         switch kind {
-        case .fileRead(let p), .fileWrite(let p):
-            return NSString(string: p).expandingTildeInPath
+        case .fileRead(let path), .fileWrite(let path):
+            return NSString(string: path).expandingTildeInPath
         case .networkConnect(let target):
             return "host:\(target)"
         }
