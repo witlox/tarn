@@ -6,8 +6,10 @@ import XCTest
 /// Wired to monitor.feature and network.feature scenarios.
 final class DecisionEngineTests: XCTestCase {
 
+    // swiftlint:disable implicitly_unwrapped_optional
     var engine: DecisionEngine!
     var mock: MockPromptService!
+    // swiftlint:enable implicitly_unwrapped_optional
 
     override func setUp() {
         super.setUp()

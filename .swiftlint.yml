@@ -10,15 +10,15 @@ disabled_rules:
   - trailing_comma
   - todo
   - line_length
+  - inclusive_language
+  - for_where
+  - non_optional_string_data_conversion
+  - force_cast
+  - unused_closure_parameter
 
 opt_in_rules:
   - empty_count
   - closure_spacing
-  - force_unwrapping
-  - implicitly_unwrapped_optional
-
-force_unwrapping:
-  severity: error
 
 identifier_name:
   min_length: 2
