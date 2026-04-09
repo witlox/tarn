@@ -1,0 +1,65 @@
+name: Bug Report
+description: Report a problem with tarn
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened? What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: How can we reproduce this?
+      placeholder: |
+        1. Run `tarn run ~/repos/my-project --agent claude`
+        2. The agent tries to access ...
+        3. The prompt shows ...
+        4. Expected: ... Actual: ...
+
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      placeholder: "e.g., 15.2 (Sequoia)"
+    validations:
+      required: true
+
+  - type: input
+    id: tarn-version
+    attributes:
+      label: tarn version
+      placeholder: "e.g., 0.1.0 (from tarn --version)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: agent
+    attributes:
+      label: Agent
+      options:
+        - Claude Code
+        - Codex
+        - Gemini CLI
+        - opencode
+        - Custom
+    validations:
+      required: true
+
+  - type: textarea
+    id: profile
+    attributes:
+      label: Profile (optional)
+      description: Output of `tarn profile show`, if relevant
+      render: toml
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (optional)
+      description: Any relevant terminal output or system logs
+      render: shell

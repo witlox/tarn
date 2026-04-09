@@ -1,0 +1,39 @@
+name: Feature Request
+description: Suggest a new feature or improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem does this solve? What workflow is currently painful?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How should tarn handle this?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What other approaches did you think about?
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - File supervision
+        - Network supervision
+        - Profile / whitelist
+        - CLI / UX
+        - Profiles / stacks
+        - Compatibility
+        - Documentation
+        - Other

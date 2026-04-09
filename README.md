@@ -1,5 +1,11 @@
 # Tarn
 
+[![Test](https://github.com/witlox/tarn/actions/workflows/test.yml/badge.svg)](https://github.com/witlox/tarn/actions/workflows/test.yml)
+[![Lint](https://github.com/witlox/tarn/actions/workflows/lint.yml/badge.svg)](https://github.com/witlox/tarn/actions/workflows/lint.yml)
+[![Swift 5.10](https://img.shields.io/badge/Swift-5.10-orange.svg)](https://swift.org)
+[![macOS 14+](https://img.shields.io/badge/macOS-14%2B-blue.svg)](https://developer.apple.com/macos/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 A macOS-native permission supervisor for AI coding agents.
 
 Tarn intercepts file and network access from AI coding agents at the kernel level, prompts you for unknown access patterns, and learns a persistent whitelist as you approve. It uses Apple's Endpoint Security framework for file supervision and a Network Extension content filter for network supervision, both running inside a single signed system extension.
