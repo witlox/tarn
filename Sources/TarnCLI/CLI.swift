@@ -13,9 +13,6 @@ struct Tarn: ParsableCommand {
 
 // MARK: - Helpers
 
-/// The CLI runs unprivileged (no sudo). The user's home directory is
-/// simply NSHomeDirectory(). The supervisor runs as root via launchd
-/// and never resolves user paths itself (INV-XPC-5).
 func defaultProfilePath() -> String {
     "\(NSHomeDirectory())/Library/Application Support/tarn/profile.toml"
 }
@@ -53,10 +50,12 @@ struct Run: ParsableCommand {
         try lock.acquire()
         defer { lock.release() }
 
-        // Load user config
-        let userConfig = try Config.load(from: profilePath)
+        // Load profile content as the user (the supervisor never reads
+        // user files — INV-XPC-5). Ensure the file exists first.
+        _ = try Config.load(from: profilePath) // creates defaults if missing
+        let profileContent = try String(contentsOfFile: profilePath, encoding: .utf8)
 
-        // Resolve profiles
+        // Resolve agent and stacks for the session summary
         let agentProfile = AgentProfile.from(name: agent)
         let stackProfiles: [StackProfile]
         if let explicit = stack {
@@ -64,21 +63,43 @@ struct Run: ParsableCommand {
         } else {
             stackProfiles = ProfileResolver.detectStack(repoPath: expandedRepo)
         }
+        let stackNames = stackProfiles.isEmpty ? [] : stackProfiles.map(\.name)
 
-        // Compose profile chain
-        var layers: [SecurityProfile] = [BaseProfile()]
-        layers += stackProfiles.map { $0.profile }
-        layers.append(agentProfile.profile)
-        let config = ProfileResolver.resolve(profiles: layers, userConfig: userConfig)
+        // Connect to the supervisor via XPC
+        let client = XPCClient(profilePath: profilePath)
+        guard client.connect() else {
+            print("tarn: cannot connect to supervisor.")
+            print("  The system extension may not be active.")
+            print("  Open Tarn.app to activate it, or check:")
+            print("  System Settings → General → Login Items & Extensions")
+            throw ExitCode.failure
+        }
+        defer { client.disconnect() }
+
+        // Start session — supervisor builds the composed profile
+        let startRequest = SessionStartRequest(
+            repoPath: expandedRepo,
+            agent: agent,
+            stacks: stackNames,
+            profilePath: profilePath,
+            userHome: NSHomeDirectory(),
+            profileContent: profileContent
+        )
+        guard let session = client.startSession(request: startRequest) else {
+            print("tarn: failed to start session with supervisor")
+            throw ExitCode.failure
+        }
+
+        defer { client.endSession(sessionId: session.sessionId) }
 
         // Display session summary
-        let stackNames = stackProfiles.map { $0.name }.joined(separator: ", ")
+        let displayStacks = session.stackNames.joined(separator: ", ")
         print("tarn session")
         print("  Agent:    \(agent) (\(agentProfile.profile.name))")
-        print("  Stacks:   \(stackNames.isEmpty ? "none" : stackNames)")
+        print("  Stacks:   \(displayStacks.isEmpty ? "none" : displayStacks)")
         print("  Repo:     \(expandedRepo)")
         print("  Profile:  \(profilePath)")
-        print("  Entries:  \(config.totalEntries) allow, \(config.deniedPaths.count) deny")
+        print("  Entries:  \(session.allowCount) allow, \(session.denyCount) deny")
         print("")
 
         // Launch agent
@@ -95,10 +116,18 @@ struct Run: ParsableCommand {
         process.standardError = FileHandle.standardError
 
         try process.run()
+
+        // Register the agent root PID with the supervisor's process tree
+        client.registerAgentRoot(sessionId: session.sessionId, pid: process.processIdentifier)
+
+        // Wait for the agent to exit. Meanwhile, XPC callbacks for
+        // prompts and persist requests arrive on background threads
+        // and are handled by the XPCClient (which calls PromptUI for
+        // prompts and Config.save for persists).
         process.waitUntilExit()
 
         if process.terminationStatus != 0 {
-            print("Agent exited with status \(process.terminationStatus)")
+            print("\nAgent exited with status \(process.terminationStatus)")
         }
         Foundation.exit(process.terminationStatus)
     }
