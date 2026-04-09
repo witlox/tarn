@@ -12,3 +12,7 @@ Package.resolved
 .vscode/
 .idea/
 *.tarn-profile.bak
+*.provisionprofile
+*.mobileprovision
+*.p12
+*.p8
