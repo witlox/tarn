@@ -199,7 +199,7 @@ When the hostname isn't available (raw TCP to an IP address), "Allow and remembe
 
 ### Timing
 
-- **File prompts**: the ES framework has a response deadline. If you don't answer in time, tarn auto-denies to avoid having macOS kill the ES client.
+- **File prompts**: the ES framework has a response deadline. If you don't answer within 25 seconds, tarn auto-denies to avoid having macOS kill the ES client.
 - **Network prompts (TCP)**: can be held indefinitely. Take your time.
 - **Network prompts (UDP)**: auto-denied after 8 seconds (macOS drops paused UDP flows after ~10 seconds).
 

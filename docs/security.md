@@ -53,11 +53,13 @@ Tarn protects against **accidental and prompt-injection-driven access** by AI co
 
 ### Deny set is inviolable
 
-The compiled-in deny list (credential paths) is checked before everything else — before trusted regions, before the allow set, before the session cache. A denied path is denied regardless of any whitelist entry, learned entry, or manual profile edit. The deny set is the security floor; it cannot be undermined by user mistakes or prompt injection tricking the user into approving access.
+The compiled-in deny list (credential paths) is checked before everything else — before the session cache, before trusted regions, before the allow set. A denied path is denied regardless of any whitelist entry, learned entry, or manual profile edit. The deny set is the security floor; it cannot be undermined by user mistakes or prompt injection tricking the user into approving access.
+
+The deny set includes: `~/.aws`, `~/.ssh/id_*` (excluding `*.pub`), `~/.ssh/config`, `~/.gnupg`, `~/.config/gh`, `~/.config/gcloud`, `~/.azure`, `~/.kube/config`, `~/.docker/config.json`, `~/.npmrc`, `~/.pypirc`, `~/.netrc`, `~/Library/Keychains`, `~/Library/Cookies`, and `~/Library/Safari`. Public keys (`~/.ssh/id_*.pub`) are explicitly excluded from the deny set since they are not secrets.
 
 ### Deny by default
 
-Every ambiguous input maps to deny. EOF on the prompt, empty input, unknown characters, broken pipe — all deny. The session cache holds both allows AND denies, so "deny once" is a session-scoped decision, not a one-shot that re-prompts on every retry.
+Every ambiguous input maps to deny. EOF on the prompt, empty input, unknown characters, broken pipe — all deny. The session cache holds both allows AND denies, so "deny once" is a session-scoped decision, not a one-shot that re-prompts on every retry. Fail-closed defaults apply throughout the system: a missing audit token causes the event to be dropped, and a connection with no extractable hostname is dropped.
 
 ### Identity is the audit token, not the PID
 
@@ -66,6 +68,22 @@ Both the ES supervisor and the NE filter identify processes by the BSM audit tok
 ### Profile persistence flows through the unprivileged CLI
 
 The supervisor (root) never writes to the user's home directory. When the user picks "Allow and remember", the supervisor sends the new entry to the CLI via XPC; the CLI writes to disk as the user. File ownership is always correct without chown hacks.
+
+### Case-insensitive path and domain matching
+
+All path and domain comparisons are case-insensitive. This prevents bypass via case variation on APFS, which is case-insensitive by default. An agent cannot read `~/.AWS/Credentials` to circumvent the deny set for `~/.aws/credentials`.
+
+### ES deadline enforcement
+
+Endpoint Security AUTH events must be answered within the kernel-imposed deadline. If a decision is not reached within 25 seconds, the supervisor auto-denies the event to prevent macOS from killing the ES client. This bounds the worst case for unattended prompts.
+
+### Agent environment scrubbing
+
+Before launching the agent subprocess, tarn scrubs the environment of known secret-bearing variables (API keys, tokens, credentials). The agent inherits a clean environment with only the variables needed for normal operation.
+
+### XPC input validation
+
+The supervisor validates all XPC inputs. The `repoPath` and `userHome` parameters are checked for path traversal and normalized before use.
 
 ### XPC connections are team-ID validated
 

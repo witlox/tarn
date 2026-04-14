@@ -64,14 +64,32 @@ See [docs/security.md](docs/security.md) for the full threat model.
 ```bash
 xcodegen generate       # generate the Xcode project from project.yml
 make build              # build TarnCore + CLI via SPM
-make test               # run 172 unit + integration tests
+make test               # run 190 unit + 17 integration tests
 ```
 
 The system extension (ES client + NE content filter) requires `xcodebuild` with the full macOS SDK:
 
 ```bash
-xcodebuild -project Tarn.xcodeproj -scheme TarnApp -configuration Release
+make release TEAM_ID=<your-team-id>   # signed Tarn.app for distribution
 ```
+
+After building, notarize for distribution:
+
+```bash
+xcrun notarytool submit .build/release-app/Tarn.app.zip --keychain-profile "tarn" --wait
+```
+
+`CFBundleVersion` is derived automatically from the git commit count.
+
+### Installation
+
+Copy `Tarn.app` to `/Applications`:
+
+```bash
+cp -R .build/release-app/Tarn.app /Applications/
+```
+
+The app must live in `/Applications` for system extension activation to succeed.
 
 ### First run
 
@@ -79,7 +97,7 @@ xcodebuild -project Tarn.xcodeproj -scheme TarnApp -configuration Release
 tarn run ~/repos/my-project
 ```
 
-On first run, macOS prompts you to approve the system extension in **System Settings → General → Login Items & Extensions**, then to enable the content filter in **System Settings → Network → Filters**. After that, the supervisor runs as a background daemon and the CLI talks to it via XPC. No `sudo` needed.
+On first run, macOS prompts you to approve the system extension in **System Settings → General → Login Items & Extensions**, then to enable the content filter in **System Settings → Network → Filters**. The content filter is activated via `NEFilterManager.saveToPreferences`. After that, the supervisor runs as a background daemon and the CLI talks to it via XPC. No `sudo` needed.
 
 ### Development without entitlements
 
@@ -148,10 +166,17 @@ Entries marked `# learned` were added by the "Allow and remember" prompt respons
 The compiled-in deny list protects sensitive credential locations regardless of any allow rule:
 
 - `~/.aws` (AWS credentials)
-- `~/.ssh/id_*` (SSH private keys)
+- `~/.ssh/id_*` (SSH private keys, excluding `*.pub`)
+- `~/.ssh/config` (SSH client configuration)
 - `~/.gnupg` (GPG keyring)
 - `~/.config/gh` (GitHub CLI tokens)
+- `~/.config/gcloud` (Google Cloud credentials)
+- `~/.azure` (Azure credentials)
+- `~/.kube/config` (Kubernetes credentials)
 - `~/.docker/config.json` (Docker credentials)
+- `~/.npmrc` (npm auth tokens)
+- `~/.pypirc` (PyPI auth tokens)
+- `~/.netrc` (machine credentials)
 - `~/Library/Keychains` (macOS Keychain)
 - `~/Library/Cookies`, `~/Library/Safari`
 
@@ -189,7 +214,8 @@ Sources/
   TarnSupervisor/       System extension: ES client + NE filter + XPC service
   TarnApp/              Host app bundle (no UI)
 Resources/              Info.plists and entitlements
-Tests/TarnCoreTests/    172 unit + integration tests
+Tests/TarnCoreTests/    190 unit tests
+Tests/TarnIntegrationTests/ 17 integration tests
 docs/                   Architecture, specs, decisions, analysis
 ```
 
