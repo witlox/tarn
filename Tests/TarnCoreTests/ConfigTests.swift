@@ -120,4 +120,49 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.totalEntries,
                        config.readonlyPaths.count + config.readwritePaths.count + config.allowedDomains.count)
     }
+
+    // MARK: - Parsing edge cases (FM-UL-1, INV-NF-5)
+
+    // FM-UL-1: Corrupt TOML (binary garbage) produces empty config
+    func testParseCorruptTOMLReturnsEmptyConfig() throws {
+        let garbage = "\\x00\\xFF\\xFE not valid TOML at all {{{[[[}}}]]]"
+        let config = try Config.parse(toml: garbage)
+        XCTAssertTrue(config.readonlyPaths.isEmpty)
+        XCTAssertTrue(config.readwritePaths.isEmpty)
+        XCTAssertTrue(config.allowedDomains.isEmpty)
+    }
+
+    // FM-UL-1: Truncated TOML (cut mid-section) returns partial config
+    func testParseTruncatedTOMLReturnsPartialConfig() throws {
+        let truncated = """
+            [paths.readonly]
+            paths = [
+              "~/.gitconfig",
+            ]
+
+            [network.allow]
+            domains = [
+              "github.com",
+            """
+        let config = try Config.parse(toml: truncated)
+        XCTAssertTrue(config.readonlyPaths.contains(where: { $0.path == "~/.gitconfig" }))
+        // Truncated domain section — github.com line is parseable
+        XCTAssertTrue(config.allowedDomains.contains(where: { $0.domain == "github.com" }))
+    }
+
+    // INV-NF-5: Wildcard domains are rejected
+    func testParseWildcardDomainThrows() {
+        let toml = """
+            [network.allow]
+            domains = [
+              "*.github.com",
+            ]
+            """
+        XCTAssertThrowsError(try Config.parse(toml: toml)) { error in
+            XCTAssertTrue(error is ConfigError)
+            let desc = (error as! ConfigError).description
+            XCTAssertTrue(desc.contains("Wildcard"))
+            XCTAssertTrue(desc.contains("*.github.com"))
+        }
+    }
 }

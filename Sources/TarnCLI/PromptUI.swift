@@ -24,21 +24,11 @@ public struct PromptUI {
         let choices = message.canRemember ? "[a/A/d]" : "[a/d]"
         print("  Choice \(choices): ", terminator: "")
 
-        guard let input = readLine()?.trimmingCharacters(in: .whitespaces) else {
-            return PromptResponseMessage(flowId: message.flowId, action: "deny", remember: false)
-        }
-
-        switch input {
-        case "a":
-            return PromptResponseMessage(flowId: message.flowId, action: "allow", remember: false)
-        case "A":
-            return PromptResponseMessage(flowId: message.flowId, action: "allow",
-                                          remember: message.canRemember)
-        case "d", "":
-            return PromptResponseMessage(flowId: message.flowId, action: "deny", remember: false)
-        default:
+        let input = readLine()
+        let response = PromptMapping.mapInput(input, message: message)
+        if response.action == "deny" && input != nil && input != "d" && input != "" {
             print("  Unknown choice, denying.")
-            return PromptResponseMessage(flowId: message.flowId, action: "deny", remember: false)
         }
+        return response
     }
 }

@@ -29,6 +29,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.witlox.tarn.core
         SKIP_INSTALL: "YES"
         GENERATE_INFOPLIST_FILE: "YES"
+        MACH_O_TYPE: staticlib
 
   # Unprivileged CLI
   TarnCLI:
@@ -55,17 +56,23 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.witlox.tarn.supervisor
+        PRODUCT_NAME: com.witlox.tarn.supervisor
         CODE_SIGN_ENTITLEMENTS: Resources/TarnSupervisor.entitlements
         CODE_SIGN_STYLE: Manual
         PROVISIONING_PROFILE_SPECIFIER: Tarn Supervisor
         SYSTEM_EXTENSION_API_USAGE: "YES"
+        OTHER_LDFLAGS: ["-lbsm", "-lEndpointSecurity"]
+        CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION: "YES"
     info:
       path: Resources/TarnSupervisor-Info.plist
       properties:
-        NSExtension:
-          NSExtensionPointIdentifier: com.apple.networkextension.filter-data
-          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).NetworkFilter"
+        CFBundlePackageType: SYSX
+        CFBundleVersion: "3"
+        NSSystemExtensionUsageDescription: Tarn system extension for file and network supervision
         NetworkExtension:
+          NEProviderClasses:
+            com.apple.networkextension.filter-data: "$(PRODUCT_MODULE_NAME).NetworkFilter"
+          NEMachServiceName: "$(TeamIdentifierPrefix)com.witlox.tarn.supervisor"
           NEFilterDataProviderDesignatedRequirement: >
             identifier "com.witlox.tarn.supervisor"
             and anchor apple generic
@@ -103,6 +110,7 @@ targets:
         LSUIElement: true
         CFBundleDisplayName: Tarn
         LSMinimumSystemVersion: "14.0"
+        NSPrincipalClass: NSApplication
 
   # Unit tests
   TarnCoreTests:
@@ -124,8 +132,7 @@ targets:
       - path: Tests/TarnIntegrationTests
     dependencies:
       - target: TarnCore
-      - target: TarnApp
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.witlox.tarn.integration-tests
-        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Tarn.app/Contents/MacOS/Tarn"
+        GENERATE_INFOPLIST_FILE: "YES"

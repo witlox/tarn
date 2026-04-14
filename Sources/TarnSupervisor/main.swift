@@ -1,5 +1,6 @@
 import Foundation
 import NetworkExtension
+import TarnCore
 
 // System extension entry point. The extension hosts both the Endpoint
 // Security client (file/process supervision) and the NEFilterDataProvider

@@ -12,22 +12,26 @@
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>SYSX</string>
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
-	<key>NSExtension</key>
-	<dict>
-		<key>NSExtensionPointIdentifier</key>
-		<string>com.apple.networkextension.filter-data</string>
-		<key>NSExtensionPrincipalClass</key>
-		<string>$(PRODUCT_MODULE_NAME).NetworkFilter</string>
-	</dict>
+	<string>3</string>
+	<key>NSSystemExtensionUsageDescription</key>
+	<string>Tarn system extension for file and network supervision</string>
 	<key>NetworkExtension</key>
 	<dict>
 		<key>NEFilterDataProviderDesignatedRequirement</key>
 		<string>identifier "com.witlox.tarn.supervisor" and anchor apple generic
 </string>
+		<key>NEMachServiceName</key>
+		<string>$(TeamIdentifierPrefix)com.witlox.tarn.supervisor</string>
+		<key>NEProviderClasses</key>
+		<dict>
+			<key>com.apple.networkextension.filter-data</key>
+			<string>$(PRODUCT_MODULE_NAME).NetworkFilter</string>
+		</dict>
 	</dict>
 </dict>
 </plist>

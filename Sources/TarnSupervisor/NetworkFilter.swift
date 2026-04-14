@@ -30,6 +30,21 @@ class NetworkFilter: NEFilterDataProvider {
     override func startFilter(completionHandler: @escaping (Error?) -> Void) {
         NetworkFilter.current = self
         NSLog("tarn: network filter starting")
+
+        // Wire the DecisionEngine to the XPC service
+        DecisionEngine.shared.promptService = XPCService.shared
+
+        // Start the XPC listener for CLI connections
+        XPCService.shared.start()
+
+        // Start the ES client for file/process events
+        do {
+            try ESClient.shared.start()
+            NSLog("tarn: ES client started")
+        } catch {
+            NSLog("tarn: ES client failed (expected without entitlement): \(error)")
+        }
+
         completionHandler(nil)
     }
 
