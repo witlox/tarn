@@ -96,6 +96,12 @@ targets:
         buildPhase:
           copyFiles:
             destination: systemExtensionsPlugins
+      - target: TarnCLI
+        embed: true
+        codeSign: true
+        buildPhase:
+          copyFiles:
+            destination: executables
     settings:
       base:
         PRODUCT_NAME: Tarn

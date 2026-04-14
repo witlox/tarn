@@ -81,23 +81,20 @@ xcrun notarytool submit .build/release-app/Tarn.app.zip --keychain-profile "tarn
 
 `CFBundleVersion` is derived automatically from the git commit count.
 
-### Installation
-
-Copy `Tarn.app` to `/Applications`:
+### Install
 
 ```bash
-cp -R .build/release-app/Tarn.app /Applications/
+# Copy the notarized app (must be in /Applications for system extension activation)
+cp -R .build/release-app/.../Tarn.app /Applications/Tarn.app
+
+# Activate the system extension and enable the content filter
+open /Applications/Tarn.app
+
+# Add the CLI to your PATH
+sudo ln -sf /Applications/Tarn.app/Contents/Resources/tarn /usr/local/bin/tarn
 ```
 
-The app must live in `/Applications` for system extension activation to succeed.
-
-### First run
-
-```bash
-tarn run ~/repos/my-project
-```
-
-On first run, macOS prompts you to approve the system extension in **System Settings → General → Login Items & Extensions**, then to enable the content filter in **System Settings → Network → Filters**. The content filter is activated via `NEFilterManager.saveToPreferences`. After that, the supervisor runs as a background daemon and the CLI talks to it via XPC. No `sudo` needed.
+On first launch, macOS prompts you to approve the system extension in **System Settings → General → Login Items & Extensions**, then to enable the content filter. After that, the supervisor runs as a background daemon and the CLI talks to it via XPC. No `sudo` needed for day-to-day use.
 
 ### Development without entitlements
 
