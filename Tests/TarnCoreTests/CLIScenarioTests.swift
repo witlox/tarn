@@ -125,7 +125,13 @@ final class CLIScenarioTests: XCTestCase {
         return path
     }
 
-    private func runTarn(_ arguments: [String]) throws -> (stdout: String, stderr: String, exitCode: Int32) {
+    private struct TarnResult {
+        let stdout: String
+        let stderr: String
+        let exitCode: Int32
+    }
+
+    private func runTarn(_ arguments: [String]) throws -> TarnResult {
         let binary = try tarnBinaryURL()
         let process = Process()
         process.executableURL = binary
@@ -138,7 +144,7 @@ final class CLIScenarioTests: XCTestCase {
         process.waitUntilExit()
         let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        return (stdout, stderr, process.terminationStatus)
+        return TarnResult(stdout: stdout, stderr: stderr, exitCode: process.terminationStatus)
     }
 
     // cli.feature: tarn with no subcommand shows help

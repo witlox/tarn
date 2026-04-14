@@ -217,8 +217,11 @@ public struct Config {
         allowedDomains.removeAll(where: { $0.learned })
     }
 
-    // MARK: - Persistence
+}
 
+// MARK: - Config Persistence
+
+extension Config {
     public static func load(from path: String) throws -> Config {
         let fileManager = FileManager.default
         let dir = (path as NSString).deletingLastPathComponent

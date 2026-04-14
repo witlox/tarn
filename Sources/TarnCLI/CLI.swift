@@ -115,23 +115,7 @@ struct Run: ParsableCommand {
         process.standardOutput = FileHandle.standardOutput
         process.standardError = FileHandle.standardError
 
-        // F50: Scrub sensitive environment variables before launching agent
-        let sensitiveKeys: Set<String> = [
-            "AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID", "AWS_SESSION_TOKEN",
-            "GITHUB_TOKEN", "GH_TOKEN",
-            "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
-            "SSH_AUTH_SOCK",
-            "NPM_TOKEN", "PYPI_TOKEN",
-        ]
-        let sensitivePatterns = ["SECRET", "PASSWORD", "CREDENTIAL", "PRIVATE_KEY"]
-        var env = ProcessInfo.processInfo.environment
-        for key in env.keys {
-            let upper = key.uppercased()
-            if sensitiveKeys.contains(upper) || sensitivePatterns.contains(where: { upper.contains($0) }) {
-                env.removeValue(forKey: key)
-            }
-        }
-        process.environment = env
+        process.environment = scrubbedEnvironment()
 
         try process.run()
 
@@ -149,6 +133,28 @@ struct Run: ParsableCommand {
         }
         Foundation.exit(process.terminationStatus)
     }
+}
+
+// MARK: - Helpers
+
+/// Remove sensitive environment variables before passing to the agent.
+func scrubbedEnvironment() -> [String: String] {
+    let sensitiveKeys: Set<String> = [
+        "AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID", "AWS_SESSION_TOKEN",
+        "GITHUB_TOKEN", "GH_TOKEN",
+        "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+        "SSH_AUTH_SOCK",
+        "NPM_TOKEN", "PYPI_TOKEN",
+    ]
+    let sensitivePatterns = ["SECRET", "PASSWORD", "CREDENTIAL", "PRIVATE_KEY"]
+    var env = ProcessInfo.processInfo.environment
+    for key in env.keys {
+        let upper = key.uppercased()
+        if sensitiveKeys.contains(upper) || sensitivePatterns.contains(where: { upper.contains($0) }) {
+            env.removeValue(forKey: key)
+        }
+    }
+    return env
 }
 
 // MARK: - tarn profile
