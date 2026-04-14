@@ -107,6 +107,135 @@ final class CLIScenarioTests: XCTestCase {
         XCTAssertTrue(stacks.contains(where: { $0.name == "stack-python" }))
     }
 
+    // MARK: - Subprocess CLI tests
+    //
+    // These run the actual tarn binary as a subprocess. They test
+    // argument parsing and profile commands that don't need XPC.
+    // The binary is built via SPM at .build/debug/tarn.
+
+    private func tarnBinaryURL() throws -> URL {
+        let path = URL(fileURLWithPath: #filePath)  // Tests/TarnCoreTests/CLIScenarioTests.swift
+            .deletingLastPathComponent()             // Tests/TarnCoreTests
+            .deletingLastPathComponent()             // Tests
+            .deletingLastPathComponent()             // project root
+            .appendingPathComponent(".build/debug/tarn")
+        guard FileManager.default.fileExists(atPath: path.path) else {
+            throw XCTSkip("tarn binary not found at \(path.path) — run 'swift build' first")
+        }
+        return path
+    }
+
+    private func runTarn(_ arguments: [String]) throws -> (stdout: String, stderr: String, exitCode: Int32) {
+        let binary = try tarnBinaryURL()
+        let process = Process()
+        process.executableURL = binary
+        process.arguments = arguments
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        try process.run()
+        process.waitUntilExit()
+        let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return (stdout, stderr, process.terminationStatus)
+    }
+
+    // cli.feature: tarn with no subcommand shows help
+    func testNoSubcommandShowsHelp() throws {
+        // ArgumentParser exits with 0 and prints help on stdout
+        // when no subcommand is given (if configured to do so),
+        // or exits non-zero. Either way, usage info should appear.
+        let result = try runTarn([])
+        let combined = result.stdout + result.stderr
+        XCTAssertTrue(combined.contains("USAGE") || combined.contains("usage") || combined.contains("SUBCOMMANDS"),
+                       "Expected usage/help text, got: \(combined.prefix(200))")
+    }
+
+    // cli.feature: tarn run fails for nonexistent repo
+    func testRunFailsForNonexistentRepo() throws {
+        let result = try runTarn(["run", "/does/not/exist/\(UUID())"])
+        XCTAssertNotEqual(result.exitCode, 0)
+        let combined = result.stdout + result.stderr
+        XCTAssertTrue(combined.contains("does not exist") || combined.contains("Error"),
+                       "Expected error about nonexistent path")
+    }
+
+    // cli.feature: tarn profile show displays sections
+    func testProfileShowDisplaysSections() throws {
+        let dir = NSTemporaryDirectory() + "tarn-cli-show-\(UUID())"
+        let profilePath = dir + "/profile.toml"
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+
+        let result = try runTarn(["profile", "show", "--profile", profilePath])
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stdout.contains("Read-only paths"))
+        XCTAssertTrue(result.stdout.contains("Read-write paths"))
+        XCTAssertTrue(result.stdout.contains("Allowed network domains"))
+    }
+
+    // cli.feature: tarn profile show tags learned entries
+    func testProfileShowTagsLearnedEntries() throws {
+        let dir = NSTemporaryDirectory() + "tarn-cli-show-learned-\(UUID())"
+        let profilePath = dir + "/profile.toml"
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+
+        // Create a profile with a learned entry
+        var config = Config.defaults()
+        config.addDomain(domain: "learned.example.com")
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try config.save(to: profilePath)
+
+        let result = try runTarn(["profile", "show", "--profile", profilePath])
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stdout.contains("learned.example.com"))
+        XCTAssertTrue(result.stdout.contains("(learned)"))
+    }
+
+    // cli.feature: tarn profile reset --force removes learned
+    func testProfileResetForceRemovesLearned() throws {
+        let dir = NSTemporaryDirectory() + "tarn-cli-reset-\(UUID())"
+        let profilePath = dir + "/profile.toml"
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+
+        var config = Config.defaults()
+        config.addDomain(domain: "learned.example.com")
+        config.addReadonly(path: "~/.learned-file")
+        try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try config.save(to: profilePath)
+
+        let result = try runTarn(["profile", "reset", "--force", "--profile", profilePath])
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stdout.contains("Removed"))
+
+        // Verify the profile was actually reset
+        let reloaded = try Config.load(from: profilePath)
+        XCTAssertFalse(reloaded.allowedDomains.contains(where: { $0.domain == "learned.example.com" }))
+    }
+
+    // cli.feature: tarn profile reset --force on clean profile
+    func testProfileResetForceOnCleanProfile() throws {
+        let dir = NSTemporaryDirectory() + "tarn-cli-reset-clean-\(UUID())"
+        let profilePath = dir + "/profile.toml"
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+
+        let result = try runTarn(["profile", "reset", "--force", "--profile", profilePath])
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stdout.contains("No learned entries") || result.stdout.contains("defaults"))
+    }
+
+    // cli.feature: tarn profile show on missing profile creates defaults
+    func testProfileShowOnMissingProfileCreatesFile() throws {
+        let dir = NSTemporaryDirectory() + "tarn-cli-show-missing-\(UUID())"
+        let profilePath = dir + "/profile.toml"
+        defer { try? FileManager.default.removeItem(atPath: dir) }
+
+        let result = try runTarn(["profile", "show", "--profile", profilePath])
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: profilePath),
+                       "Profile file should be created with defaults")
+    }
+
     // Scenario: Profile composition for a full session
     func testFullProfileCompositionForSession() {
         let userConfig = Config(readonlyPaths: [

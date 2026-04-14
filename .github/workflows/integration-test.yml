@@ -1,0 +1,31 @@
+name: Integration Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      team_id:
+        description: 'Apple Developer Team ID'
+        required: true
+
+jobs:
+  integration-test:
+    name: Integration Tests
+    runs-on: self-hosted  # Requires macOS runner with system extension active
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Run integration tests
+        run: |
+          xcodebuild test \
+            -project Tarn.xcodeproj \
+            -scheme TarnIntegrationTests \
+            -destination 'platform=macOS' \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Developer ID Application" \
+            DEVELOPMENT_TEAM=${{ inputs.team_id }}

@@ -67,7 +67,7 @@ targets:
       path: Resources/TarnSupervisor-Info.plist
       properties:
         CFBundlePackageType: SYSX
-        CFBundleVersion: "3"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         NSSystemExtensionUsageDescription: Tarn system extension for file and network supervision
         NetworkExtension:
           NEProviderClasses:

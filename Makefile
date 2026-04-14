@@ -8,6 +8,7 @@ export DEVELOPER_DIR
 TEAM_ID ?=
 
 VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo "dev")
+BUILD_NUMBER ?= $(shell git rev-list --count HEAD 2>/dev/null || echo "1")
 BUILD_DIR := .build/release-app
 DMG_NAME := Tarn-$(VERSION).dmg
 
@@ -46,7 +47,8 @@ install-dev: project
 		-configuration Debug \
 		-derivedDataPath $(BUILD_DIR)/DerivedData \
 		DEVELOPMENT_TEAM=$(TEAM_ID) \
-		CODE_SIGN_IDENTITY="Developer ID Application"
+		CODE_SIGN_IDENTITY="Developer ID Application" \
+		CURRENT_PROJECT_VERSION=$(BUILD_NUMBER)
 	$(eval APP := $(shell find $(BUILD_DIR)/DerivedData -name "Tarn.app" -type d | head -1))
 	@echo ""
 	@echo "Built: $(APP)"
@@ -69,7 +71,8 @@ release: project
 		DEVELOPMENT_TEAM=$(TEAM_ID) \
 		CODE_SIGN_IDENTITY="Developer ID Application" \
 		OTHER_CODE_SIGN_FLAGS="--timestamp --options runtime" \
-		CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO
+		CODE_SIGN_INJECT_BASE_ENTITLEMENTS=NO \
+		CURRENT_PROJECT_VERSION=$(BUILD_NUMBER)
 	$(eval APP := $(shell find $(BUILD_DIR)/DerivedData -name "Tarn.app" -type d | head -1))
 	@echo "Built: $(APP)"
 	@codesign -dvv "$(APP)" 2>&1 | head -3
