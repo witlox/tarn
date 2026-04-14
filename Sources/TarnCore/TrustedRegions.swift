@@ -12,11 +12,17 @@ public struct TrustedRegions {
     /// Check if a path is in a trusted region.
     /// Workspace and /tmp allow reads and writes.
     /// System paths allow reads only.
+    /// Both sides lowercased for case-insensitive APFS.
     public static func isTrusted(path: String, repoPath: String, isWrite: Bool) -> Bool {
-        if !repoPath.isEmpty && path.hasPrefix(repoPath) { return true }
-        if path.hasPrefix("/tmp") || path.hasPrefix("/var/tmp") { return true }
+        let normalizedPath = path.lowercased()
+        if !repoPath.isEmpty {
+            let normalizedRepo = repoPath.lowercased()
+            if normalizedPath == normalizedRepo || normalizedPath.hasPrefix(normalizedRepo + "/") { return true }
+        }
+        if normalizedPath == "/tmp" || normalizedPath.hasPrefix("/tmp/") ||
+           normalizedPath == "/var/tmp" || normalizedPath.hasPrefix("/var/tmp/") { return true }
         if !isWrite {
-            if systemPrefixes.contains(where: { path.hasPrefix($0) }) { return true }
+            if systemPrefixes.contains(where: { normalizedPath == $0.lowercased() || normalizedPath.hasPrefix($0.lowercased() + "/") }) { return true }
         }
         return false
     }

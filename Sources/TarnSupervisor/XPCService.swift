@@ -69,8 +69,16 @@ final class XPCService: NSObject, PromptService {
             value = domain
         }
 
+        // F9/F22: Always use the supervisor's stored profile path,
+        // never accept a path from the request. This prevents the CLI
+        // from being tricked into writing to an arbitrary file.
+        guard let profilePath = currentProfilePath, !profilePath.isEmpty else {
+            NSLog("tarn: persist rejected — no active profile path")
+            reply(false)
+            return
+        }
         let persistReq = PersistEntryRequest(
-            path: currentProfilePath ?? "",
+            path: profilePath,
             mode: mode,
             value: value
         )
@@ -96,10 +104,15 @@ extension XPCService: NSXPCListenerDelegate {
 
         connection.invalidationHandler = { [weak self] in
             self?.cliConnection = nil
+            self?.currentProfilePath = nil
             // Drain paused network flows so the agent doesn't hang (INV-XPC-2)
             NetworkFilter.current?.drainAllPausedFlows()
+            // F5/F52: Full session teardown — clear cache, process tree,
+            // and reset config to defaults so stale policy cannot persist.
             DecisionEngine.shared.sessionCache.clear()
-            NSLog("tarn supervisor: CLI disconnected; session state cleared")
+            DecisionEngine.shared.processTree.removeAll()
+            DecisionEngine.shared.configure(config: Config.defaults(), repoPath: "")
+            NSLog("tarn supervisor: CLI disconnected; full session state reset")
         }
 
         connection.resume()
@@ -123,9 +136,11 @@ extension XPCService: NSXPCListenerDelegate {
         guard SecCodeCopySigningInformation(ownCode, SecCSFlags(rawValue: kSecCSSigningInformation), &selfInfo) == errSecSuccess,
               let selfDict = selfInfo as? [String: Any],
               let selfTeam = selfDict[kSecCodeInfoTeamIdentifier as String] as? String else {
-            // If we can't determine our own team ID (SIP-disabled dev),
-            // allow all connections
-            return true
+            // Cannot determine our own team ID — deny by default.
+            // On SIP-disabled dev machines, use `tarn --skip-team-check`
+            // or sign the build with a team identity.
+            NSLog("tarn supervisor: cannot determine own team ID; denying connection")
+            return false
         }
 
         // Get the peer's team ID via its PID (auditToken is not
@@ -160,6 +175,28 @@ extension XPCService: TarnSupervisorXPC {
     func startSession(_ configData: Data, reply: @escaping (Data?, NSError?) -> Void) {
         guard let request = try? JSONDecoder().decode(SessionStartRequest.self, from: configData) else {
             reply(nil, NSError(domain: "tarn", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid session request"]))
+            return
+        }
+
+        // F4/F27: Validate repoPath — must be absolute, not root, and
+        // an existing directory.
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard request.repoPath.hasPrefix("/"),
+              request.repoPath != "/",
+              fm.fileExists(atPath: request.repoPath, isDirectory: &isDir),
+              isDir.boolValue else {
+            reply(nil, NSError(domain: "tarn", code: 4,
+                               userInfo: [NSLocalizedDescriptionKey:
+                                   "Invalid repoPath: must be an absolute path to an existing directory (not /)"]))
+            return
+        }
+
+        // F4/F27: Validate userHome — must be absolute and under /Users/ or /var/root.
+        guard request.userHome.hasPrefix("/Users/") || request.userHome == "/var/root" else {
+            reply(nil, NSError(domain: "tarn", code: 4,
+                               userInfo: [NSLocalizedDescriptionKey:
+                                   "Invalid userHome: must start with /Users/ or be /var/root"]))
             return
         }
 
@@ -207,6 +244,15 @@ extension XPCService: TarnSupervisorXPC {
     }
 
     func registerAgentRoot(_ sessionId: String, pid: Int32, reply: @escaping (NSError?) -> Void) {
+        // F3: Validate the PID actually exists before adding to the
+        // process tree. kill(pid, 0) checks existence without sending
+        // a signal.
+        guard pid > 0, kill(pid, 0) == 0 else {
+            let msg = "PID \(pid) does not exist or is invalid"
+            NSLog("tarn supervisor: rejecting registerAgentRoot — %@", msg)
+            reply(NSError(domain: "tarn", code: 3, userInfo: [NSLocalizedDescriptionKey: msg]))
+            return
+        }
         ESClient.shared.registerAgentPID(pid)
         reply(nil)
     }

@@ -6,6 +6,7 @@ import Foundation
 public class ProcessTree {
     private var supervisedPIDs: Set<pid_t> = []
     private let lock = NSLock()
+    private let maxSize = 10_000
 
     /// Called when the tree becomes empty after a removal.
     /// The session manager can use this to detect "all supervised
@@ -18,6 +19,10 @@ public class ProcessTree {
     public func addRoot(pid: pid_t) {
         lock.lock()
         defer { lock.unlock() }
+        guard supervisedPIDs.count < maxSize else {
+            NSLog("tarn: process tree at capacity (%d), refusing addRoot for pid %d", maxSize, pid)
+            return
+        }
         supervisedPIDs.insert(pid)
     }
 
@@ -26,6 +31,10 @@ public class ProcessTree {
         lock.lock()
         defer { lock.unlock() }
         if supervisedPIDs.contains(parentPID) {
+            guard supervisedPIDs.count < maxSize else {
+                NSLog("tarn: process tree at capacity (%d), refusing addChild for pid %d", maxSize, pid)
+                return
+            }
             supervisedPIDs.insert(pid)
         }
     }

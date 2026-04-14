@@ -37,12 +37,17 @@ public struct BaseProfile: SecurityProfile {
     /// that no agent should access.
     public let deniedPaths: [String] = [
         "~/.ssh/id_*",
-        "~/.ssh/id_*.pub",
+        "~/.ssh/config",
         "~/.aws",
         "~/.gnupg",
         "~/.config/gh",
         "~/.netrc",
         "~/.docker/config.json",
+        "~/.kube/config",
+        "~/.config/gcloud",
+        "~/.azure",
+        "~/.npmrc",
+        "~/.pypirc",
         "~/Library/Keychains",
         "~/Library/Cookies",
         "~/Library/Safari",

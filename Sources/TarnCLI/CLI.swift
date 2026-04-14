@@ -115,6 +115,24 @@ struct Run: ParsableCommand {
         process.standardOutput = FileHandle.standardOutput
         process.standardError = FileHandle.standardError
 
+        // F50: Scrub sensitive environment variables before launching agent
+        let sensitiveKeys: Set<String> = [
+            "AWS_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID", "AWS_SESSION_TOKEN",
+            "GITHUB_TOKEN", "GH_TOKEN",
+            "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+            "SSH_AUTH_SOCK",
+            "NPM_TOKEN", "PYPI_TOKEN",
+        ]
+        let sensitivePatterns = ["SECRET", "PASSWORD", "CREDENTIAL", "PRIVATE_KEY"]
+        var env = ProcessInfo.processInfo.environment
+        for key in env.keys {
+            let upper = key.uppercased()
+            if sensitiveKeys.contains(upper) || sensitivePatterns.contains(where: { upper.contains($0) }) {
+                env.removeValue(forKey: key)
+            }
+        }
+        process.environment = env
+
         try process.run()
 
         // Register the agent root PID with the supervisor's process tree

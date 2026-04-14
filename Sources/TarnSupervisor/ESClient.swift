@@ -71,9 +71,10 @@ final class ESClient {
         case ES_EVENT_TYPE_AUTH_OPEN:
             handleAuthOpen(message)
         default:
-            if let client = client {
-                es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
-            }
+            // F20: Only AUTH events require a response. NOTIFY events
+            // must NOT be responded to — calling es_respond_auth_result
+            // on a NOTIFY message is undefined behaviour.
+            break
         }
     }
 
@@ -128,11 +129,19 @@ final class ESClient {
         let kind: AccessRequest.Kind = isWrite ? .fileWrite(path: path) : .fileRead(path: path)
         let request = AccessRequest(kind: kind, pid: pid, processPath: processPath)
 
-        // Async decision: retain the message, respond from the callback
+        // Async decision: retain the message, respond from the callback.
+        // F18: The callback captures `self` (not the local `client`) so
+        // that a stop() between retain and callback doesn't use a stale
+        // pointer. If client is nil the message was already released by
+        // es_delete_client.
         es_retain_message(message)
-        engine.asyncDecide(request: request) { action in
+        engine.asyncDecide(request: request) { [weak self] action in
+            guard let currentClient = self?.client else {
+                es_release_message(message)
+                return
+            }
             let result: es_auth_result_t = (action == .allow) ? ES_AUTH_RESULT_ALLOW : ES_AUTH_RESULT_DENY
-            es_respond_auth_result(client, message, result, false)
+            es_respond_auth_result(currentClient, message, result, false)
             es_release_message(message)
         }
     }

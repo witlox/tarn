@@ -76,10 +76,13 @@ class NetworkFilter: NEFilterDataProvider {
             return .allow()
         }
 
-        // Extract source PID from audit token
+        // F39: Extract source PID from audit token. If the token is
+        // missing or malformed, drop — we cannot identify the source
+        // process, so allowing would bypass supervision entirely.
         guard let tokenData = flow.sourceAppAuditToken,
               tokenData.count == MemoryLayout<audit_token_t>.size else {
-            return .allow()
+            NSLog("tarn: dropping flow with missing/malformed audit token")
+            return .drop()
         }
         let pid = tokenData.withUnsafeBytes { ptr -> pid_t in
             let token = ptr.load(as: audit_token_t.self)
@@ -99,7 +102,10 @@ class NetworkFilter: NEFilterDataProvider {
             // No hostname available — use the IP as identifier
             hostname = endpoint.hostname
         } else {
-            return .allow()
+            // F40: No hostname and no remote endpoint — cannot identify
+            // destination. Drop to prevent unidentifiable exfiltration.
+            NSLog("tarn: dropping supervised flow with no identifiable destination (pid %d)", pid)
+            return .drop()
         }
 
         // Build an AccessRequest for the decision engine
@@ -142,6 +148,7 @@ class NetworkFilter: NEFilterDataProvider {
                 self.flowLock.unlock()
                 return
             }
+            self.pausedFlowOrder.removeAll(where: { $0 == flowId })
             self.flowLock.unlock()
 
             let verdict: NEFilterNewFlowVerdict = action == .allow ? .allow() : .drop()
@@ -157,9 +164,10 @@ class NetworkFilter: NEFilterDataProvider {
                     self.flowLock.unlock()
                     return
                 }
+                self.pausedFlowOrder.removeAll(where: { $0 == flowId })
                 self.flowLock.unlock()
-                let cacheKey = request.cacheKey
-                DecisionEngine.shared.sessionCache.record(key: cacheKey, action: .deny)
+                let udpCacheKey = "udp-timeout:host:\(hostname)"
+                DecisionEngine.shared.sessionCache.record(key: udpCacheKey, action: .deny)
                 self.resumeFlow(udpFlow, with: NEFilterNewFlowVerdict.drop())
                 NSLog("tarn: auto-denied UDP flow to \(hostname) due to 10s deadline")
             }

@@ -11,20 +11,40 @@ import Foundation
 /// events). Thread-safe; ES events arrive on multiple threads.
 public final class SessionCache {
     private var entries: [String: AccessAction] = [:]
+    /// Insertion-ordered keys for LRU eviction. Most recently used at the end.
+    private var order: [String] = []
     private let lock = NSLock()
+    private let maxSize = 10_000
 
     public init() {}
 
     public func record(key: String, action: AccessAction) {
+        let normalized = key.lowercased()
         lock.lock()
         defer { lock.unlock() }
-        entries[key] = action
+        if entries[normalized] != nil {
+            // Move to end (most recent)
+            order.removeAll(where: { $0 == normalized })
+        } else if entries.count >= maxSize {
+            // Evict oldest entry
+            if let oldest = order.first {
+                order.removeFirst()
+                entries.removeValue(forKey: oldest)
+            }
+        }
+        entries[normalized] = action
+        order.append(normalized)
     }
 
     public func lookup(key: String) -> AccessAction? {
+        let normalized = key.lowercased()
         lock.lock()
         defer { lock.unlock() }
-        return entries[key]
+        guard let action = entries[normalized] else { return nil }
+        // Move to end (most recently used)
+        order.removeAll(where: { $0 == normalized })
+        order.append(normalized)
+        return action
     }
 
     public var count: Int {
@@ -37,5 +57,6 @@ public final class SessionCache {
         lock.lock()
         defer { lock.unlock() }
         entries.removeAll()
+        order.removeAll()
     }
 }

@@ -15,21 +15,43 @@ public struct Lock {
     /// Try to acquire the lock. Throws `TarnError.lockHeld` if another
     /// live tarn already holds it. Stale locks (PID dead) are removed
     /// and the new instance proceeds.
+    ///
+    /// Uses `open(O_CREAT|O_EXCL)` for atomic file creation to prevent
+    /// TOCTOU races between checking and writing the lock file.
     public func acquire() throws {
         let fm = FileManager.default
-
-        if fm.fileExists(atPath: path) {
-            if let pid = try? readHoldingPID(), kill(pid, 0) == 0 {
-                throw TarnError.lockHeld(path: path, pid: pid)
-            }
-            // Stale lock — best-effort remove and proceed.
-            try? fm.removeItem(atPath: path)
-        }
-
         let dir = (path as NSString).deletingLastPathComponent
         try fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
+
         let pidString = String(getpid()) + "\n"
-        try pidString.write(toFile: path, atomically: true, encoding: .utf8)
+
+        // Attempt atomic exclusive creation first
+        let fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0o644)
+        if fd >= 0 {
+            // Successfully created — write our PID
+            _ = pidString.withCString { ptr in
+                Darwin.write(fd, ptr, strlen(ptr))
+            }
+            close(fd)
+            return
+        }
+
+        // File already exists — check if the holder is still alive
+        if let pid = try? readHoldingPID(), kill(pid, 0) == 0 {
+            throw TarnError.lockHeld(path: path, pid: pid)
+        }
+
+        // Stale lock — remove and retry with exclusive create
+        try? fm.removeItem(atPath: path)
+        let fd2 = open(path, O_WRONLY | O_CREAT | O_EXCL, 0o644)
+        guard fd2 >= 0 else {
+            // Another process grabbed it between our remove and create
+            throw TarnError.lockHeld(path: path, pid: 0)
+        }
+        _ = pidString.withCString { ptr in
+            Darwin.write(fd2, ptr, strlen(ptr))
+        }
+        close(fd2)
     }
 
     /// Release the lock. Best effort; never throws. Caller normally

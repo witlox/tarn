@@ -19,12 +19,14 @@ public struct AccessRequest {
     }
 
     /// Session-cache key. Tilde-expanded path for files, "host:<target>" for network.
+    /// Normalized to lowercase so case variants hit the same entry (APFS is
+    /// case-insensitive by default; DNS is case-insensitive per RFC 4343).
     public var cacheKey: String {
         switch kind {
         case .fileRead(let path), .fileWrite(let path):
-            return NSString(string: path).expandingTildeInPath
+            return NSString(string: path).expandingTildeInPath.lowercased()
         case .networkConnect(let target):
-            return "host:\(target)"
+            return "host:\(target.lowercased())"
         }
     }
 }
@@ -102,31 +104,32 @@ public struct Config {
     public func check(request: AccessRequest) -> AccessAction? {
         switch request.kind {
         case .fileRead(let path):
-            let expanded = expandPath(path)
+            let expanded = expandPath(path).lowercased()
             // Denied paths take precedence
             if isDenied(path: expanded) { return .deny }
-            if readonlyPaths.contains(where: { expandPath($0.path) == expanded }) ||
-               readwritePaths.contains(where: { expandPath($0.path) == expanded }) {
+            if readonlyPaths.contains(where: { expandPath($0.path).lowercased() == expanded }) ||
+               readwritePaths.contains(where: { expandPath($0.path).lowercased() == expanded }) {
                 return .allow
             }
             return nil
 
         case .fileWrite(let path):
-            let expanded = expandPath(path)
+            let expanded = expandPath(path).lowercased()
             if isDenied(path: expanded) { return .deny }
-            if readwritePaths.contains(where: { expandPath($0.path) == expanded }) {
+            if readwritePaths.contains(where: { expandPath($0.path).lowercased() == expanded }) {
                 return .allow
             }
             // Read-only paths explicitly deny writes
-            if readonlyPaths.contains(where: { expandPath($0.path) == expanded }) {
+            if readonlyPaths.contains(where: { expandPath($0.path).lowercased() == expanded }) {
                 return .deny
             }
             return nil
 
         case .networkConnect(let domain):
+            let normalizedDomain = domain.lowercased()
             // Deny set checked first (INV-AC-3)
-            if deniedDomains.contains(domain) { return .deny }
-            if allowedDomains.contains(where: { $0.domain == domain }) {
+            if deniedDomains.contains(where: { $0.lowercased() == normalizedDomain }) { return .deny }
+            if allowedDomains.contains(where: { $0.domain.lowercased() == normalizedDomain }) {
                 return .allow
             }
             return nil
@@ -139,15 +142,29 @@ public struct Config {
         return isDenied(path: path)
     }
 
+    /// Check if any access request is denied, regardless of kind.
+    /// Used by DecisionEngine to enforce denials before the session cache.
+    public func isDenied(request: AccessRequest) -> Bool {
+        switch request.kind {
+        case .fileRead(let path), .fileWrite(let path):
+            return isDenied(path: expandPath(path).lowercased())
+        case .networkConnect(let domain):
+            let normalizedDomain = domain.lowercased()
+            return deniedDomains.contains(where: { $0.lowercased() == normalizedDomain })
+        }
+    }
+
     /// Check if a path matches any denied pattern.
     /// Supports exact match, directory prefix, and simple glob (* suffix).
+    /// Both sides are lowercased because APFS is case-insensitive by default.
     private func isDenied(path: String) -> Bool {
+        let normalizedPath = path.lowercased()
         for pattern in deniedPaths {
-            let expandedPattern = expandPath(pattern)
+            let expandedPattern = expandPath(pattern).lowercased()
             if expandedPattern.hasSuffix("*") {
                 let prefix = String(expandedPattern.dropLast())
-                if path.hasPrefix(prefix) { return true }
-            } else if path == expandedPattern || path.hasPrefix(expandedPattern + "/") {
+                if normalizedPath.hasPrefix(prefix) { return true }
+            } else if normalizedPath == expandedPattern || normalizedPath.hasPrefix(expandedPattern + "/") {
                 return true
             }
         }
@@ -155,29 +172,42 @@ public struct Config {
     }
 
     /// Learn from an approved access request.
+    /// Silently skips if the path/domain is in the deny set (F26).
+    /// Normalizes to lowercase before storing to prevent case-variant duplicates.
     public mutating func learn(request: AccessRequest) {
         switch request.kind {
         case .fileRead(let path):
-            addReadonly(path: path)
+            let normalized = path.lowercased()
+            let expanded = expandPath(normalized)
+            guard !isDenied(path: expanded) else { return }
+            addReadonly(path: normalized)
         case .fileWrite(let path):
-            addReadwrite(path: path)
+            let normalized = path.lowercased()
+            let expanded = expandPath(normalized)
+            guard !isDenied(path: expanded) else { return }
+            addReadwrite(path: normalized)
         case .networkConnect(let domain):
-            addDomain(domain: domain)
+            let normalized = domain.lowercased()
+            guard !deniedDomains.contains(where: { $0.lowercased() == normalized }) else { return }
+            addDomain(domain: normalized)
         }
     }
 
     public mutating func addReadonly(path: String) {
-        guard !readonlyPaths.contains(where: { $0.path == path }) else { return }
+        let normalized = path.lowercased()
+        guard !readonlyPaths.contains(where: { $0.path.lowercased() == normalized }) else { return }
         readonlyPaths.append(MountEntry(path: path, mode: .readonly, learned: true))
     }
 
     public mutating func addReadwrite(path: String) {
-        guard !readwritePaths.contains(where: { $0.path == path }) else { return }
+        let normalized = path.lowercased()
+        guard !readwritePaths.contains(where: { $0.path.lowercased() == normalized }) else { return }
         readwritePaths.append(MountEntry(path: path, mode: .readwrite, learned: true))
     }
 
     public mutating func addDomain(domain: String) {
-        guard !allowedDomains.contains(where: { $0.domain == domain }) else { return }
+        let normalized = domain.lowercased()
+        guard !allowedDomains.contains(where: { $0.domain.lowercased() == normalized }) else { return }
         allowedDomains.append(DomainEntry(domain: domain, learned: true))
     }
 
@@ -215,7 +245,7 @@ public struct Config {
             if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
 
             if trimmed.hasPrefix("[") {
-                currentSection = trimmed
+                currentSection = trimmed.lowercased()
                 continue
             }
 
@@ -255,6 +285,9 @@ public struct Config {
         func escaped(_ value: String) -> String {
             value.replacingOccurrences(of: "\\", with: "\\\\")
                  .replacingOccurrences(of: "\"", with: "\\\"")
+                 .replacingOccurrences(of: "\n", with: "\\n")
+                 .replacingOccurrences(of: "\r", with: "\\r")
+                 .replacingOccurrences(of: "\t", with: "\\t")
         }
 
         lines.append("[paths.readonly]")
@@ -349,12 +382,15 @@ public struct Config {
     /// Check if an already-expanded path matches any denied pattern.
     /// After `expandAllPaths`, the deny patterns are already expanded
     /// so no tilde expansion is needed at check time.
+    /// Both sides lowercased for case-insensitive APFS.
     public func isDeniedExpanded(path: String) -> Bool {
+        let normalizedPath = path.lowercased()
         for pattern in deniedPaths {
-            if pattern.hasSuffix("*") {
-                let prefix = String(pattern.dropLast())
-                if path.hasPrefix(prefix) { return true }
-            } else if path == pattern || path.hasPrefix(pattern + "/") {
+            let normalizedPattern = pattern.lowercased()
+            if normalizedPattern.hasSuffix("*") {
+                let prefix = String(normalizedPattern.dropLast())
+                if normalizedPath.hasPrefix(prefix) { return true }
+            } else if normalizedPath == normalizedPattern || normalizedPath.hasPrefix(normalizedPattern + "/") {
                 return true
             }
         }
