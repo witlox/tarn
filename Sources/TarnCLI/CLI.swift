@@ -102,36 +102,68 @@ struct Run: ParsableCommand {
         print("  Entries:  \(session.allowCount) allow, \(session.denyCount) deny")
         print("")
 
-        // Launch agent
+        // Launch agent using posix_spawn for proper TTY inheritance.
+        // Swift's Process() can place the child in a new process group,
+        // making it a background job that can't read from the terminal.
+        // posix_spawn without POSIX_SPAWN_SETPGROUP keeps the child in
+        // our process group (the foreground group), so interactive agents
+        // like Claude Code can read/write the TTY normally.
         let agentCommand = agentProfile.launchCommand
         print("Launching: \(agentCommand.joined(separator: " "))")
         print("")
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = agentCommand
-        process.currentDirectoryURL = URL(fileURLWithPath: expandedRepo)
-        process.standardInput = FileHandle.standardInput
-        process.standardOutput = FileHandle.standardOutput
-        process.standardError = FileHandle.standardError
+        let fullCommand = ["/usr/bin/env"] + agentCommand
+        let argv: [UnsafeMutablePointer<CChar>?] = fullCommand.map { strdup($0) } + [nil]
+        defer { argv.forEach { if let p = $0 { free(p) } } }
 
-        process.environment = scrubbedEnvironment()
+        let env = scrubbedEnvironment()
+        let envp: [UnsafeMutablePointer<CChar>?] = env.map { strdup("\($0.key)=\($0.value)") } + [nil]
+        defer { envp.forEach { if let p = $0 { free(p) } } }
 
-        try process.run()
+        var fileActions: posix_spawn_file_actions_t?
+        posix_spawn_file_actions_init(&fileActions)
+        posix_spawn_file_actions_addchdir_np(&fileActions, expandedRepo)
+        defer { posix_spawn_file_actions_destroy(&fileActions) }
+
+        var attrs: posix_spawnattr_t?
+        posix_spawnattr_init(&attrs)
+        defer { posix_spawnattr_destroy(&attrs) }
+
+        var agentPid: pid_t = 0
+        let spawnResult = posix_spawnp(&agentPid, argv[0], &fileActions, &attrs, argv, envp)
+        guard spawnResult == 0 else {
+            print("tarn: failed to launch agent (errno \(spawnResult))")
+            throw ExitCode.failure
+        }
 
         // Register the agent root PID with the supervisor's process tree
-        client.registerAgentRoot(sessionId: session.sessionId, pid: process.processIdentifier)
+        client.registerAgentRoot(sessionId: session.sessionId, pid: agentPid)
+
+        // Give the agent the foreground terminal so it can do
+        // interactive I/O (raw mode, cursor control, etc.)
+        let savedPgrp = tcgetpgrp(STDIN_FILENO)
+        if savedPgrp >= 0 {
+            tcsetpgrp(STDIN_FILENO, agentPid)
+        }
 
         // Wait for the agent to exit. Meanwhile, XPC callbacks for
         // prompts and persist requests arrive on background threads
         // and are handled by the XPCClient (which calls PromptUI for
         // prompts and Config.save for persists).
-        process.waitUntilExit()
+        var status: Int32 = 0
+        waitpid(agentPid, &status, 0)
 
-        if process.terminationStatus != 0 {
-            print("\nAgent exited with status \(process.terminationStatus)")
+        // Reclaim the terminal foreground
+        if savedPgrp >= 0 {
+            tcsetpgrp(STDIN_FILENO, savedPgrp)
         }
-        Foundation.exit(process.terminationStatus)
+
+        let exited = (status & 0x7F) == 0
+        let exitCode = exited ? (status >> 8) & 0xFF : Int32(1)
+        if exitCode != 0 {
+            print("\nAgent exited with status \(exitCode)")
+        }
+        Foundation.exit(exitCode)
     }
 }
 
