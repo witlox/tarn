@@ -102,64 +102,14 @@ struct Run: ParsableCommand {
         print("  Entries:  \(session.allowCount) allow, \(session.denyCount) deny")
         print("")
 
-        // Launch agent using posix_spawn for proper TTY inheritance.
-        // Swift's Process() can place the child in a new process group,
-        // making it a background job that can't read from the terminal.
-        // posix_spawn without POSIX_SPAWN_SETPGROUP keeps the child in
-        // our process group (the foreground group), so interactive agents
-        // like Claude Code can read/write the TTY normally.
         let agentCommand = agentProfile.launchCommand
         print("Launching: \(agentCommand.joined(separator: " "))")
         print("")
 
-        let fullCommand = ["/usr/bin/env"] + agentCommand
-        let argv: [UnsafeMutablePointer<CChar>?] = fullCommand.map { strdup($0) } + [nil]
-        defer { argv.forEach { if let p = $0 { free(p) } } }
-
-        let env = scrubbedEnvironment()
-        let envp: [UnsafeMutablePointer<CChar>?] = env.map { strdup("\($0.key)=\($0.value)") } + [nil]
-        defer { envp.forEach { if let p = $0 { free(p) } } }
-
-        var fileActions: posix_spawn_file_actions_t?
-        posix_spawn_file_actions_init(&fileActions)
-        posix_spawn_file_actions_addchdir_np(&fileActions, expandedRepo)
-        defer { posix_spawn_file_actions_destroy(&fileActions) }
-
-        var attrs: posix_spawnattr_t?
-        posix_spawnattr_init(&attrs)
-        defer { posix_spawnattr_destroy(&attrs) }
-
-        var agentPid: pid_t = 0
-        let spawnResult = posix_spawnp(&agentPid, argv[0], &fileActions, &attrs, argv, envp)
-        guard spawnResult == 0 else {
-            print("tarn: failed to launch agent (errno \(spawnResult))")
-            throw ExitCode.failure
-        }
-
-        // Register the agent root PID with the supervisor's process tree
+        let agentPid = try spawnAgent(command: agentCommand, workingDirectory: expandedRepo)
         client.registerAgentRoot(sessionId: session.sessionId, pid: agentPid)
 
-        // Give the agent the foreground terminal so it can do
-        // interactive I/O (raw mode, cursor control, etc.)
-        let savedPgrp = tcgetpgrp(STDIN_FILENO)
-        if savedPgrp >= 0 {
-            tcsetpgrp(STDIN_FILENO, agentPid)
-        }
-
-        // Wait for the agent to exit. Meanwhile, XPC callbacks for
-        // prompts and persist requests arrive on background threads
-        // and are handled by the XPCClient (which calls PromptUI for
-        // prompts and Config.save for persists).
-        var status: Int32 = 0
-        waitpid(agentPid, &status, 0)
-
-        // Reclaim the terminal foreground
-        if savedPgrp >= 0 {
-            tcsetpgrp(STDIN_FILENO, savedPgrp)
-        }
-
-        let exited = (status & 0x7F) == 0
-        let exitCode = exited ? (status >> 8) & 0xFF : Int32(1)
+        let exitCode = waitForAgent(pid: agentPid)
         if exitCode != 0 {
             print("\nAgent exited with status \(exitCode)")
         }
@@ -168,6 +118,58 @@ struct Run: ParsableCommand {
 }
 
 // MARK: - Helpers
+
+/// Launch the agent via posix_spawn for proper TTY inheritance.
+/// Swift's Process() can place the child in a new process group,
+/// making it a background job that can't read from the terminal.
+/// posix_spawn without POSIX_SPAWN_SETPGROUP keeps the child in
+/// our process group, so interactive agents can use the TTY normally.
+func spawnAgent(command: [String], workingDirectory: String) throws -> pid_t {
+    let fullCommand = ["/usr/bin/env"] + command
+    let argv: [UnsafeMutablePointer<CChar>?] = fullCommand.map { strdup($0) } + [nil]
+    defer { argv.forEach { if let ptr = $0 { free(ptr) } } }
+
+    let env = scrubbedEnvironment()
+    let envp: [UnsafeMutablePointer<CChar>?] = env.map { strdup("\($0.key)=\($0.value)") } + [nil]
+    defer { envp.forEach { if let ptr = $0 { free(ptr) } } }
+
+    var fileActions: posix_spawn_file_actions_t?
+    posix_spawn_file_actions_init(&fileActions)
+    posix_spawn_file_actions_addchdir_np(&fileActions, workingDirectory)
+    defer { posix_spawn_file_actions_destroy(&fileActions) }
+
+    var attrs: posix_spawnattr_t?
+    posix_spawnattr_init(&attrs)
+    defer { posix_spawnattr_destroy(&attrs) }
+
+    var pid: pid_t = 0
+    let result = posix_spawnp(&pid, argv[0], &fileActions, &attrs, argv, envp)
+    guard result == 0 else {
+        print("tarn: failed to launch agent (errno \(result))")
+        throw ExitCode.failure
+    }
+    return pid
+}
+
+/// Wait for the agent process to exit, managing terminal foreground.
+func waitForAgent(pid: pid_t) -> Int32 {
+    // Give the agent the foreground terminal for interactive I/O
+    let savedPgrp = tcgetpgrp(STDIN_FILENO)
+    if savedPgrp >= 0 {
+        tcsetpgrp(STDIN_FILENO, pid)
+    }
+
+    var status: Int32 = 0
+    waitpid(pid, &status, 0)
+
+    // Reclaim the terminal foreground
+    if savedPgrp >= 0 {
+        tcsetpgrp(STDIN_FILENO, savedPgrp)
+    }
+
+    let exited = (status & 0x7F) == 0
+    return exited ? (status >> 8) & 0xFF : Int32(1)
+}
 
 /// Remove sensitive environment variables before passing to the agent.
 func scrubbedEnvironment() -> [String: String] {
