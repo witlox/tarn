@@ -98,7 +98,7 @@ final class ESClient {
 
         // Fast path: no supervised session → allow everything instantly.
         let tree = DecisionEngine.shared.processTree
-        guard tree.count > 0 else {
+        guard !tree.isEmpty else {
             es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
             return
         }

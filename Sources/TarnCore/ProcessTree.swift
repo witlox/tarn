@@ -70,4 +70,11 @@ public class ProcessTree {
         defer { lock.unlock() }
         return supervisedPIDs.count
     }
+
+    /// Whether the tree has no supervised PIDs.
+    public var isEmpty: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return supervisedPIDs.isEmpty
+    }
 }

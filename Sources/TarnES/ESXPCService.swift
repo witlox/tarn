@@ -299,7 +299,7 @@ extension ESXPCService: TarnNetworkEvalXPC {
         let engine = DecisionEngine.shared
 
         // Not supervised → allow (not supervised)
-        guard tree.count > 0, tree.isSupervised(pid: request.pid) else {
+        guard !tree.isEmpty, tree.isSupervised(pid: request.pid) else {
             let allow = NetworkFlowResponse(action: "allow", supervised: false)
             reply((try? JSONEncoder().encode(allow)) ?? Data())
             return
