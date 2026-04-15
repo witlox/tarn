@@ -24,8 +24,8 @@ struct Run: ParsableCommand {
         abstract: "Launch a supervised agent session for a repository"
     )
 
-    @Argument(help: "Path to the repository (read-write workspace)")
-    var repoPath: String
+    @Argument(help: "Path to the repository (read-write workspace). Defaults to current directory.")
+    var repoPath: String?
 
     @Option(name: .long, help: "Agent to run (e.g. claude, codex, gemini)")
     var agent: String = "claude"
@@ -40,7 +40,8 @@ struct Run: ParsableCommand {
     var resume: Bool = false
 
     func run() throws {
-        let expandedRepo = NSString(string: repoPath).expandingTildeInPath
+        let rawPath = repoPath ?? FileManager.default.currentDirectoryPath
+        let expandedRepo = NSString(string: rawPath).expandingTildeInPath
         guard FileManager.default.fileExists(atPath: expandedRepo) else {
             throw ValidationError("Repository path does not exist: \(expandedRepo)")
         }
