@@ -27,7 +27,7 @@ final class XPCClient: NSObject {
     /// Connect to the supervisor's Mach service. Returns false if
     /// the connection cannot be established (supervisor not active).
     func connect() -> Bool {
-        let conn = NSXPCConnection(machServiceName: kTarnSupervisorMachServiceName)
+        let conn = NSXPCConnection(machServiceName: kTarnESMachServiceName)
         conn.remoteObjectInterface = NSXPCInterface(with: TarnSupervisorXPC.self)
         conn.exportedInterface = NSXPCInterface(with: TarnCLICallbackXPC.self)
         conn.exportedObject = self

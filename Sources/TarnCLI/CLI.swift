@@ -106,6 +106,12 @@ struct Run: ParsableCommand {
         print("Launching: \(agentCommand.joined(separator: " "))")
         print("")
 
+        // Ignore SIGTTOU so our XPC callbacks can write to the
+        // terminal even when the agent's process group is foreground.
+        // Without this, the shell suspends tarn when it tries to
+        // output the prompt.
+        signal(SIGTTOU, SIG_IGN)
+
         let agentPid = try spawnAgent(command: agentCommand, workingDirectory: expandedRepo)
         client.agentPid = agentPid
         client.registerAgentRoot(sessionId: session.sessionId, pid: agentPid)

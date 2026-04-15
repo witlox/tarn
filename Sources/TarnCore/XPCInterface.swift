@@ -1,11 +1,19 @@
 import Foundation
 
-/// Mach service name for the supervisor's XPC endpoint.
+/// Mach service name for the supervisor's XPC endpoint (NE filter).
 /// Must match NEMachServiceName in TarnSupervisor-Info.plist.
 /// The NE framework requires this to be prefixed by an app group
 /// from the com.apple.security.application-groups entitlement.
 /// Our app group is "group.com.witlox.tarn".
 public let kTarnSupervisorMachServiceName = "group.com.witlox.tarn.supervisor"
+
+/// Mach service name for the ES extension's CLI XPC endpoint.
+/// The CLI connects here for session management and prompts.
+public let kTarnESMachServiceName = "group.com.witlox.tarn.es"
+
+/// Mach service name for the ES extension's NE bridge endpoint.
+/// The NE extension connects here to forward flow evaluations.
+public let kTarnESBridgeMachServiceName = "group.com.witlox.tarn.es.bridge"
 
 // MARK: - XPC protocols
 
@@ -104,5 +112,39 @@ public struct PromptResponseMessage: Codable {
         self.flowId = flowId
         self.action = action
         self.remember = remember
+    }
+}
+
+// MARK: - Network evaluation XPC (NE extension → ES extension)
+
+/// Protocol for the NE extension to forward flow evaluations to the
+/// ES extension, which hosts the DecisionEngine and ProcessTree.
+@objc public protocol TarnNetworkEvalXPC {
+    func evaluateFlow(_ requestData: Data, reply: @escaping (Data) -> Void)
+}
+
+/// Request sent from the NE extension to the ES extension for flow evaluation.
+public struct NetworkFlowRequest: Codable {
+    public let pid: Int32
+    public let hostname: String
+    public let isUDP: Bool
+
+    public init(pid: Int32, hostname: String, isUDP: Bool) {
+        self.pid = pid
+        self.hostname = hostname
+        self.isUDP = isUDP
+    }
+}
+
+/// Response from the ES extension back to the NE extension.
+public struct NetworkFlowResponse: Codable {
+    public let action: String  // "allow" or "deny"
+    /// Whether this PID was supervised. The NE extension uses this to
+    /// build a local cache of supervised PIDs for fast-path filtering.
+    public let supervised: Bool
+
+    public init(action: String, supervised: Bool = false) {
+        self.action = action
+        self.supervised = supervised
     }
 }

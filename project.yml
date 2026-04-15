@@ -46,7 +46,32 @@ targets:
         PRODUCT_NAME: tarn
         PRODUCT_BUNDLE_IDENTIFIER: com.witlox.tarn.cli
 
-  # System extension: ES client + NEFilterDataProvider + XPC service
+  # ES system extension: Endpoint Security client + XPC service for CLI and NE
+  TarnES:
+    type: system-extension
+    platform: macOS
+    sources:
+      - path: Sources/TarnES
+    dependencies:
+      - target: TarnCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.witlox.tarn.es
+        PRODUCT_NAME: com.witlox.tarn.es
+        CODE_SIGN_ENTITLEMENTS: Resources/TarnES.entitlements
+        CODE_SIGN_STYLE: Manual
+        PROVISIONING_PROFILE_SPECIFIER: Tarn ES
+        SYSTEM_EXTENSION_API_USAGE: "YES"
+        OTHER_LDFLAGS: ["-lbsm", "-lEndpointSecurity"]
+        CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION: "YES"
+    info:
+      path: Resources/TarnES-Info.plist
+      properties:
+        CFBundlePackageType: SYSX
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        NSSystemExtensionUsageDescription: Tarn ES extension for file and process supervision
+
+  # NE system extension: thin network filter proxy, forwards to TarnES via XPC
   TarnSupervisor:
     type: system-extension
     platform: macOS
@@ -54,6 +79,8 @@ targets:
       - path: Sources/TarnSupervisor
         excludes:
           - "main.swift"
+          - "ESClient.swift"
+          - "XPCService.swift"
     dependencies:
       - target: TarnCore
     settings:
@@ -64,7 +91,7 @@ targets:
         CODE_SIGN_STYLE: Manual
         PROVISIONING_PROFILE_SPECIFIER: Tarn Supervisor
         SYSTEM_EXTENSION_API_USAGE: "YES"
-        OTHER_LDFLAGS: ["-lbsm", "-lEndpointSecurity"]
+        OTHER_LDFLAGS: ["-lbsm"]
         CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION: "YES"
     info:
       path: Resources/TarnSupervisor-Info.plist
@@ -93,6 +120,12 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     dependencies:
       - target: TarnCore
+      - target: TarnES
+        embed: true
+        codeSign: true
+        buildPhase:
+          copyFiles:
+            destination: systemExtensionsPlugins
       - target: TarnSupervisor
         embed: true
         codeSign: true

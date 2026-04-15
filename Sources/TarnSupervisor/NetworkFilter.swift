@@ -3,22 +3,20 @@ import NetworkExtension
 import TarnCore
 
 /// NEFilterDataProvider subclass that intercepts outbound network flows
-/// from supervised processes. Identifies the source process by audit
-/// token, extracts the destination hostname (from remoteHostname, TLS
-/// SNI, or raw IP fallback), and routes the decision through the shared
-/// DecisionEngine.
+/// from supervised processes. Extracts PID and hostname from each flow,
+/// then forwards to the ES extension via XPC for the actual decision.
 ///
-/// Novel flows are paused via `pauseVerdict()` while the user is
-/// prompted through XPC. TCP flows can be paused indefinitely; UDP
-/// flows must be resolved within ~10 seconds or macOS auto-drops them,
-/// so a watchdog timer auto-denies UDP flows after 8 seconds.
+/// The NE extension is a thin proxy — all policy decisions (deny set,
+/// allow set, session cache, user prompts) happen in the ES extension
+/// which hosts the DecisionEngine, ProcessTree, and SessionCache.
 ///
-/// This provider does NOT use a synchronous semaphore wait inside
-/// `handleNewFlow` — that pattern is a documented anti-pattern that
-/// starves the provider thread pool.
+/// Novel flows are paused via `pauseVerdict()` while the ES extension
+/// evaluates them. TCP flows can be paused indefinitely; UDP flows must
+/// be resolved within ~10 seconds or macOS auto-drops them, so a
+/// watchdog timer auto-denies UDP flows after 8 seconds.
 class NetworkFilter: NEFilterDataProvider {
 
-    /// Shared reference so XPCService invalidation handler can drain flows.
+    /// Shared reference so external code can drain flows if needed.
     static weak var current: NetworkFilter?
 
     /// Track paused flows for the resume callback.
@@ -29,27 +27,17 @@ class NetworkFilter: NEFilterDataProvider {
 
     override func startFilter(completionHandler: @escaping (Error?) -> Void) {
         NetworkFilter.current = self
-        NSLog("tarn: network filter starting")
+        NSLog("tarn-ne: network filter starting")
 
-        // Wire the DecisionEngine to the XPC service
-        DecisionEngine.shared.promptService = XPCService.shared
-
-        // Start the XPC listener for CLI connections
-        XPCService.shared.start()
-
-        // Start the ES client for file/process events
-        do {
-            try ESClient.shared.start()
-            NSLog("tarn: ES client started")
-        } catch {
-            NSLog("tarn: ES client failed (expected without entitlement): \(error)")
-        }
+        // Connect to the ES extension for flow evaluation
+        ESBridgeClient.shared.connect()
+        NSLog("tarn-ne: connected to ES extension")
 
         completionHandler(nil)
     }
 
-    /// Resume all paused flows with drop. Called on CLI disconnect
-    /// (INV-XPC-2) and on filter stop.
+    /// Resume all paused flows with ALLOW. Called on filter stop
+    /// and session teardown. Fail-open: never block flows on shutdown.
     func drainAllPausedFlows() {
         flowLock.lock()
         let flows = pausedFlows
@@ -57,25 +45,24 @@ class NetworkFilter: NEFilterDataProvider {
         pausedFlowOrder.removeAll()
         flowLock.unlock()
         for (_, flow) in flows {
-            resumeFlow(flow, with: NEFilterNewFlowVerdict.drop())
+            resumeFlow(flow, with: NEFilterNewFlowVerdict.allow())
         }
         if !flows.isEmpty {
-            NSLog("tarn: drained \(flows.count) paused flows with deny")
+            NSLog("tarn-ne: drained \(flows.count) paused flows with allow")
         }
     }
 
     override func stopFilter(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
-        NSLog("tarn: network filter stopping (reason: \(reason.rawValue))")
+        NSLog("tarn-ne: network filter stopping (reason: \(reason.rawValue))")
         drainAllPausedFlows()
         NetworkFilter.current = nil
         completionHandler()
     }
 
     override func handleNewFlow(_ flow: NEFilterFlow) -> NEFilterNewFlowVerdict {
-        // Fast path: if no supervised session is active, allow everything.
+        // Fast path: no active session → allow everything instantly.
         // This ensures tarn NEVER affects non-supervised traffic.
-        let tree = DecisionEngine.shared.processTree
-        guard tree.count > 0 else { return .allow() }
+        guard ESBridgeClient.shared.hasActiveSession else { return .allow() }
 
         guard let socketFlow = flow as? NEFilterSocketFlow else {
             return .allow()
@@ -91,8 +78,8 @@ class NetworkFilter: NEFilterDataProvider {
             return audit_token_to_pid(token)
         }
 
-        // Not in the supervised tree → allow immediately.
-        guard tree.isSupervised(pid: pid) else {
+        // Not supervised → allow immediately, no XPC needed.
+        guard ESBridgeClient.shared.isSupervised(pid: pid) else {
             return .allow()
         }
 
@@ -101,34 +88,23 @@ class NetworkFilter: NEFilterDataProvider {
         if let remoteHost = socketFlow.remoteHostname, !remoteHost.isEmpty {
             hostname = remoteHost
         } else if let endpoint = socketFlow.remoteEndpoint as? NWHostEndpoint {
-            // No hostname available — use the IP as identifier
             hostname = endpoint.hostname
         } else {
-            // F40: No hostname and no remote endpoint — cannot identify
-            // destination. Drop to prevent unidentifiable exfiltration.
-            NSLog("tarn: dropping supervised flow with no identifiable destination (pid %d)", pid)
-            return .drop()
+            // No hostname and no remote endpoint — allow rather than
+            // block. Fail-open: never block flows we can't evaluate.
+            return .allow()
         }
 
-        // Build an AccessRequest for the decision engine
-        // sourceAppIdentifier is iOS-only; on macOS use the audit token
-        let processPath = "pid:\(pid)"
-        let request = AccessRequest(
-            kind: .networkConnect(domain: hostname),
-            pid: pid,
-            processPath: processPath
-        )
+        let isUDP = socketFlow.socketType == SOCK_DGRAM
 
-        // Quick decision (deny set, allow set, session cache)
-        if let quick = DecisionEngine.shared.quickDecide(request: request) {
-            return quick == .allow ? .allow() : .drop()
-        }
+        // Build request for the ES extension
+        let request = NetworkFlowRequest(pid: pid, hostname: hostname, isUDP: isUDP)
 
-        // Need a prompt — pause the flow and ask via XPC
+        // Pause the flow and forward to ES extension via XPC
         let flowId = UUID().uuidString
         var evictedFlow: NEFilterFlow?
         flowLock.lock()
-        // Evict oldest if at capacity — collect under lock, resume after
+        // Evict oldest if at capacity
         if pausedFlows.count >= maxPausedFlows, let oldest = pausedFlowOrder.first {
             pausedFlowOrder.removeFirst()
             evictedFlow = pausedFlows.removeValue(forKey: oldest)
@@ -141,9 +117,8 @@ class NetworkFilter: NEFilterDataProvider {
             resumeFlow(evicted, with: NEFilterNewFlowVerdict.drop())
         }
 
-        // Route through the shared async decision engine (handles
-        // prompt, persist-via-CLI, and session cache)
-        DecisionEngine.shared.asyncDecide(request: request) { [weak self] action in
+        // Forward to ES extension for decision
+        ESBridgeClient.shared.evaluate(request) { [weak self] action in
             guard let self = self else { return }
             self.flowLock.lock()
             guard let pausedFlow = self.pausedFlows.removeValue(forKey: flowId) else {
@@ -158,7 +133,7 @@ class NetworkFilter: NEFilterDataProvider {
         }
 
         // Start UDP watchdog — auto-deny after 8 seconds
-        if socketFlow.socketType == SOCK_DGRAM {
+        if isUDP {
             DispatchQueue.global().asyncAfter(deadline: .now() + 8) { [weak self] in
                 guard let self = self else { return }
                 self.flowLock.lock()
@@ -168,10 +143,8 @@ class NetworkFilter: NEFilterDataProvider {
                 }
                 self.pausedFlowOrder.removeAll(where: { $0 == flowId })
                 self.flowLock.unlock()
-                let udpCacheKey = "udp-timeout:host:\(hostname)"
-                DecisionEngine.shared.sessionCache.record(key: udpCacheKey, action: .deny)
                 self.resumeFlow(udpFlow, with: NEFilterNewFlowVerdict.drop())
-                NSLog("tarn: auto-denied UDP flow to \(hostname) due to 10s deadline")
+                NSLog("tarn-ne: auto-denied UDP flow to \(hostname) due to 10s deadline")
             }
         }
 

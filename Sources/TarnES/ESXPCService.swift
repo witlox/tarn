@@ -1,15 +1,21 @@
 import Foundation
 import TarnCore
 
-/// XPC service hosted by the supervisor system extension. Accepts
-/// connections from the tarn CLI and handles session management.
-/// Also supports bidirectional communication: the supervisor can
-/// call back to the CLI for interactive prompts.
-final class XPCService: NSObject, PromptService {
-    static let shared = XPCService()
+/// XPC service hosted by the ES system extension. Accepts connections
+/// from the tarn CLI (session management, prompts, persist) and from
+/// the NE extension (network flow evaluation). Replaces the old
+/// unified XPCService that lived in TarnSupervisor.
+///
+/// Uses two XPC listeners:
+/// - `kTarnESMachServiceName` for CLI connections (bidirectional)
+/// - `kTarnSupervisorMachServiceName` for NE extension connections
+///   (the NE extension connects here to forward flow evaluations)
+final class ESXPCService: NSObject, PromptService {
+    static let shared = ESXPCService()
 
-    private var listener: NSXPCListener?
-    private var cliConnection: NSXPCConnection?
+    private var cliListener: NSXPCListener?
+    private var neListener: NSXPCListener?
+    fileprivate var cliConnection: NSXPCConnection?
     public var currentProfilePath: String?
 
     private override init() {
@@ -17,19 +23,31 @@ final class XPCService: NSObject, PromptService {
     }
 
     func start() {
-        listener = NSXPCListener(machServiceName: kTarnSupervisorMachServiceName)
-        listener?.delegate = self
-        listener?.resume()
-        NSLog("tarn supervisor: XPC listener started on \(kTarnSupervisorMachServiceName)")
+        // Listener for CLI connections
+        let cliDelegate = CLIListenerDelegate(service: self)
+        cliListener = NSXPCListener(machServiceName: kTarnESMachServiceName)
+        cliListener?.delegate = cliDelegate
+        // Hold a strong reference to the delegate
+        objc_setAssociatedObject(cliListener!, "delegate", cliDelegate, .OBJC_ASSOCIATION_RETAIN)
+        cliListener?.resume()
+        NSLog("tarn-es: CLI XPC listener started on \(kTarnESMachServiceName)")
+
+        // Listener for NE extension connections
+        let neDelegate = NEListenerDelegate(service: self)
+        neListener = NSXPCListener(machServiceName: kTarnESBridgeMachServiceName)
+        neListener?.delegate = neDelegate
+        objc_setAssociatedObject(neListener!, "delegate", neDelegate, .OBJC_ASSOCIATION_RETAIN)
+        neListener?.resume()
+        NSLog("tarn-es: NE XPC listener started on \(kTarnESBridgeMachServiceName)")
     }
 
     /// Send an asynchronous prompt request. Used by both ES (via
-    /// es_retain_message + deferred response) and NE (via pauseVerdict
-    /// + resumeFlow). Never blocks the caller.
+    /// es_retain_message + deferred response) and NE proxy (via
+    /// evaluateFlow). Never blocks the caller.
     func asyncPrompt(_ message: PromptRequestMessage, reply: @escaping (PromptResponseMessage) -> Void) {
         guard let connection = cliConnection,
               let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
-                  NSLog("tarn: XPC error during async prompt: \(error)")
+                  NSLog("tarn-es: XPC error during async prompt: \(error)")
                   reply(PromptResponseMessage(flowId: message.flowId, action: "deny", remember: false))
               }) as? TarnCLICallbackXPC else {
             reply(PromptResponseMessage(flowId: message.flowId, action: "deny", remember: false))
@@ -43,12 +61,13 @@ final class XPCService: NSObject, PromptService {
             reply(decoded)
         }
     }
+
     /// Ask the CLI to persist a learned entry to the user's profile.
     /// The CLI does the actual file I/O as the user (INV-XPC-4).
     func asyncPersistEntry(request: AccessRequest, reply: @escaping (Bool) -> Void) {
         guard let connection = cliConnection,
               let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
-                  NSLog("tarn: XPC error during persist: \(error)")
+                  NSLog("tarn-es: XPC error during persist: \(error)")
                   reply(false)
               }) as? TarnCLICallbackXPC else {
             reply(false)
@@ -70,10 +89,9 @@ final class XPCService: NSObject, PromptService {
         }
 
         // F9/F22: Always use the supervisor's stored profile path,
-        // never accept a path from the request. This prevents the CLI
-        // from being tricked into writing to an arbitrary file.
+        // never accept a path from the request.
         guard let profilePath = currentProfilePath, !profilePath.isEmpty else {
-            NSLog("tarn: persist rejected — no active profile path")
+            NSLog("tarn-es: persist rejected — no active profile path")
             reply(false)
             return
         }
@@ -89,43 +107,87 @@ final class XPCService: NSObject, PromptService {
     }
 }
 
-extension XPCService: NSXPCListenerDelegate {
+// MARK: - CLI Listener Delegate
+
+/// Handles XPC connections from the CLI. Sets up bidirectional XPC
+/// with TarnSupervisorXPC (outgoing) and TarnCLICallbackXPC (incoming).
+private final class CLIListenerDelegate: NSObject, NSXPCListenerDelegate {
+    weak var service: ESXPCService?
+
+    init(service: ESXPCService) {
+        self.service = service
+        super.init()
+    }
+
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
-        // Verify the connecting process is signed by the same team
+        guard let service = service else { return false }
+
         if !validateConnectionTeamID(connection) {
-            NSLog("tarn supervisor: rejecting XPC connection — team ID mismatch")
+            NSLog("tarn-es: rejecting CLI XPC connection — team ID mismatch")
             return false
         }
 
-        // Set up bidirectional XPC
         connection.exportedInterface = NSXPCInterface(with: TarnSupervisorXPC.self)
-        connection.exportedObject = self
+        connection.exportedObject = service
         connection.remoteObjectInterface = NSXPCInterface(with: TarnCLICallbackXPC.self)
 
-        connection.invalidationHandler = { [weak self] in
-            self?.cliConnection = nil
-            self?.currentProfilePath = nil
-            // Drain paused network flows so the agent doesn't hang (INV-XPC-2)
-            NetworkFilter.current?.drainAllPausedFlows()
-            // F5/F52: Full session teardown — clear cache, process tree,
-            // and reset config to defaults so stale policy cannot persist.
-            DecisionEngine.shared.sessionCache.clear()
-            DecisionEngine.shared.processTree.removeAll()
-            DecisionEngine.shared.configure(config: Config.defaults(), repoPath: "")
-            NSLog("tarn supervisor: CLI disconnected; full session state reset")
+        connection.invalidationHandler = { [weak service] in
+            guard let service = service else { return }
+            if connection === service.cliConnection {
+                service.cliConnection = nil
+                service.currentProfilePath = nil
+                // F5/F52: Full session teardown
+                DecisionEngine.shared.sessionCache.clear()
+                DecisionEngine.shared.processTree.removeAll()
+                DecisionEngine.shared.configure(config: Config.defaults(), repoPath: "")
+                NSLog("tarn-es: CLI disconnected; full session state reset")
+            }
         }
 
         connection.resume()
-        cliConnection = connection
-        NSLog("tarn supervisor: CLI connected")
+        service.cliConnection = connection
+        NSLog("tarn-es: CLI connected (pid %d)", connection.processIdentifier)
         return true
     }
+}
 
-    /// Verify the connecting process is signed by the same team ID as
-    /// the supervisor. Extracts the audit token from the connection,
-    /// resolves via SecCode, and compares team identifiers.
-    private func validateConnectionTeamID(_ connection: NSXPCConnection) -> Bool {
-        // Get our own team ID via SecStaticCode
+// MARK: - NE Extension Listener Delegate
+
+/// Handles XPC connections from the NE extension (TarnSupervisor).
+/// Exposes the TarnNetworkEvalXPC interface for flow evaluation.
+private final class NEListenerDelegate: NSObject, NSXPCListenerDelegate {
+    weak var service: ESXPCService?
+
+    init(service: ESXPCService) {
+        self.service = service
+        super.init()
+    }
+
+    func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
+        guard let service = service else { return false }
+
+        if !validateConnectionTeamID(connection) {
+            NSLog("tarn-es: rejecting NE XPC connection — team ID mismatch")
+            return false
+        }
+
+        connection.exportedInterface = NSXPCInterface(with: TarnNetworkEvalXPC.self)
+        connection.exportedObject = service
+
+        connection.invalidationHandler = {
+            NSLog("tarn-es: NE extension disconnected")
+        }
+
+        connection.resume()
+        NSLog("tarn-es: NE extension connected (pid %d)", connection.processIdentifier)
+        return true
+    }
+}
+
+// MARK: - Shared team ID validation
+
+extension NSXPCListenerDelegate {
+    func validateConnectionTeamID(_ connection: NSXPCConnection) -> Bool {
         var selfCode: SecStaticCode?
         var dynamicCode: SecCode?
         guard SecCodeCopySelf([], &dynamicCode) == errSecSuccess,
@@ -136,15 +198,10 @@ extension XPCService: NSXPCListenerDelegate {
         guard SecCodeCopySigningInformation(ownCode, SecCSFlags(rawValue: kSecCSSigningInformation), &selfInfo) == errSecSuccess,
               let selfDict = selfInfo as? [String: Any],
               let selfTeam = selfDict[kSecCodeInfoTeamIdentifier as String] as? String else {
-            // Cannot determine our own team ID — deny by default.
-            // On SIP-disabled dev machines, use `tarn --skip-team-check`
-            // or sign the build with a team identity.
-            NSLog("tarn supervisor: cannot determine own team ID; denying connection")
+            NSLog("tarn-es: cannot determine own team ID; denying connection")
             return false
         }
 
-        // Get the peer's team ID via its PID (auditToken is not
-        // directly accessible; use processIdentifier instead)
         let peerPID = connection.processIdentifier
         var peerDynCode: SecCode?
         let pidAttrs: [String: Any] = [kSecGuestAttributePid as String: peerPID]
@@ -160,10 +217,7 @@ extension XPCService: NSXPCListenerDelegate {
         }
 
         guard let peerTeam = peerDict[kSecCodeInfoTeamIdentifier as String] as? String else {
-            // Peer has no team ID (e.g., Apple-signed xctest).
-            // Allow but log — the entitlement check on our side is
-            // the primary security boundary, not the team ID match.
-            NSLog("tarn supervisor: allowing connection from unsigned/Apple peer (PID %d)", peerPID)
+            NSLog("tarn-es: allowing connection from unsigned/Apple peer (PID %d)", peerPID)
             return true
         }
 
@@ -171,15 +225,16 @@ extension XPCService: NSXPCListenerDelegate {
     }
 }
 
-extension XPCService: TarnSupervisorXPC {
+// MARK: - CLI XPC Protocol (TarnSupervisorXPC)
+
+extension ESXPCService: TarnSupervisorXPC {
     func startSession(_ configData: Data, reply: @escaping (Data?, NSError?) -> Void) {
         guard let request = try? JSONDecoder().decode(SessionStartRequest.self, from: configData) else {
             reply(nil, NSError(domain: "tarn", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid session request"]))
             return
         }
 
-        // F4/F27: Validate repoPath — must be absolute, not root, and
-        // an existing directory.
+        // F4/F27: Validate repoPath
         let fm = FileManager.default
         var isDir: ObjCBool = false
         guard request.repoPath.hasPrefix("/"),
@@ -192,7 +247,7 @@ extension XPCService: TarnSupervisorXPC {
             return
         }
 
-        // F4/F27: Validate userHome — must be absolute and under /Users/ or /var/root.
+        // F4/F27: Validate userHome
         guard request.userHome.hasPrefix("/Users/") || request.userHome == "/var/root" else {
             reply(nil, NSError(domain: "tarn", code: 4,
                                userInfo: [NSLocalizedDescriptionKey:
@@ -201,8 +256,6 @@ extension XPCService: TarnSupervisorXPC {
         }
 
         do {
-            // Parse profile from content sent by the CLI — the
-            // supervisor never reads user files directly (INV-XPC-5).
             let userConfig = try Config.parse(toml: request.profileContent)
             let agentProfile = AgentProfile.from(name: request.agent)
             let stackProfiles: [StackProfile]
@@ -216,12 +269,8 @@ extension XPCService: TarnSupervisorXPC {
             layers += stackProfiles.map { $0.profile }
             layers.append(agentProfile.profile)
             var config = ProfileResolver.resolve(profiles: layers, userConfig: userConfig)
-            // Expand all tilde paths using the CLI user's home, not
-            // root's home. Without this, the deny set is broken.
             config.expandAllPaths(userHome: request.userHome)
 
-            // Build agent-specific trusted paths from the profile's
-            // readonly and readwrite entries, expanded with the user's home.
             let secProfile = agentProfile.profile
             let agentPaths = (secProfile.readonlyPaths + secProfile.readwritePaths).map { path in
                 path.hasPrefix("~/") ? request.userHome + path.dropFirst(1) : path
@@ -243,23 +292,62 @@ extension XPCService: TarnSupervisorXPC {
     }
 
     func endSession(_ sessionId: String, reply: @escaping () -> Void) {
-        NetworkFilter.current?.drainAllPausedFlows()
         DecisionEngine.shared.sessionCache.clear()
         DecisionEngine.shared.processTree.removeAll()
         reply()
     }
 
     func registerAgentRoot(_ sessionId: String, pid: Int32, reply: @escaping (NSError?) -> Void) {
-        // F3: Validate the PID actually exists before adding to the
-        // process tree. kill(pid, 0) checks existence without sending
-        // a signal.
         guard pid > 0, kill(pid, 0) == 0 else {
             let msg = "PID \(pid) does not exist or is invalid"
-            NSLog("tarn supervisor: rejecting registerAgentRoot — %@", msg)
+            NSLog("tarn-es: rejecting registerAgentRoot — %@", msg)
             reply(NSError(domain: "tarn", code: 3, userInfo: [NSLocalizedDescriptionKey: msg]))
             return
         }
         ESClient.shared.registerAgentPID(pid)
         reply(nil)
+    }
+}
+
+// MARK: - Network Eval XPC Protocol (from NE extension)
+
+extension ESXPCService: TarnNetworkEvalXPC {
+    func evaluateFlow(_ requestData: Data, reply: @escaping (Data) -> Void) {
+        guard let request = try? JSONDecoder().decode(NetworkFlowRequest.self, from: requestData) else {
+            // Can't decode → fail-open
+            let allow = NetworkFlowResponse(action: "allow")
+            reply((try? JSONEncoder().encode(allow)) ?? Data())
+            return
+        }
+
+        let tree = DecisionEngine.shared.processTree
+        let engine = DecisionEngine.shared
+
+        // Not supervised → allow (not supervised)
+        guard tree.count > 0, tree.isSupervised(pid: request.pid) else {
+            let allow = NetworkFlowResponse(action: "allow", supervised: false)
+            reply((try? JSONEncoder().encode(allow)) ?? Data())
+            return
+        }
+
+        let processPath = "pid:\(request.pid)"
+        let accessRequest = AccessRequest(
+            kind: .networkConnect(domain: request.hostname),
+            pid: request.pid,
+            processPath: processPath
+        )
+
+        // Quick decision (deny set, allow set, session cache)
+        if let quick = engine.quickDecide(request: accessRequest) {
+            let response = NetworkFlowResponse(action: quick == .allow ? "allow" : "deny", supervised: true)
+            reply((try? JSONEncoder().encode(response)) ?? Data())
+            return
+        }
+
+        // Full async decision with prompt
+        engine.asyncDecide(request: accessRequest) { action in
+            let response = NetworkFlowResponse(action: action == .allow ? "allow" : "deny", supervised: true)
+            reply((try? JSONEncoder().encode(response)) ?? Data())
+        }
     }
 }
