@@ -7,13 +7,56 @@ import Foundation
 /// Our app group is "group.com.witlox.tarn".
 public let kTarnSupervisorMachServiceName = "group.com.witlox.tarn.supervisor"
 
-/// Mach service name for the ES extension's CLI XPC endpoint.
-/// The CLI connects here for session management and prompts.
-public let kTarnESMachServiceName = "group.com.witlox.tarn.es"
+/// Mach service name for the ES extension's XPC endpoint.
+/// launchd auto-registers ES system extensions under
+/// "<TeamID>.<BundleID>.xpc". Resolved at runtime since
+/// we don't hardcode the team ID.
+public var kTarnESMachServiceName: String {
+    // The ES extension reads its own team ID
+    if let team = resolveTeamID() {
+        return "\(team).com.witlox.tarn.es.xpc"
+    }
+    // Fallback: try the app group prefix (won't work for ES sysext,
+    // but allows unit tests to run)
+    return "group.com.witlox.tarn.es"
+}
 
-/// Mach service name for the ES extension's NE bridge endpoint.
-/// The NE extension connects here to forward flow evaluations.
-public let kTarnESBridgeMachServiceName = "group.com.witlox.tarn.es.bridge"
+/// Same Mach service — both CLI and NE bridge use the same endpoint.
+/// The ESXPCService distinguishes connections by their exported interface.
+public var kTarnESBridgeMachServiceName: String { kTarnESMachServiceName }
+
+/// Resolve the team identifier at runtime from the code signature
+/// of the running process, or from the installed Tarn.app bundle.
+private func resolveTeamID() -> String? {
+    // Path 1: own code signature
+    var code: SecCode?
+    if SecCodeCopySelf([], &code) == errSecSuccess, let code = code {
+        var staticCode: SecStaticCode?
+        if SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let sc = staticCode {
+            var info: CFDictionary?
+            if SecCodeCopySigningInformation(sc, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+               let dict = info as? [String: Any],
+               let team = dict[kSecCodeInfoTeamIdentifier as String] as? String {
+                return team
+            }
+        }
+    }
+    // Path 2: Tarn.app in /Applications
+    let appPath = "/Applications/Tarn.app"
+    if FileManager.default.fileExists(atPath: appPath) {
+        var staticCode: SecStaticCode?
+        let url = URL(fileURLWithPath: appPath) as CFURL
+        if SecStaticCodeCreateWithPath(url, [], &staticCode) == errSecSuccess, let sc = staticCode {
+            var info: CFDictionary?
+            if SecCodeCopySigningInformation(sc, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
+               let dict = info as? [String: Any],
+               let team = dict[kSecCodeInfoTeamIdentifier as String] as? String {
+                return team
+            }
+        }
+    }
+    return nil
+}
 
 // MARK: - XPC protocols
 

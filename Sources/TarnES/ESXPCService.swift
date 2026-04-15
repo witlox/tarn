@@ -13,8 +13,7 @@ import TarnCore
 final class ESXPCService: NSObject, PromptService {
     static let shared = ESXPCService()
 
-    private var cliListener: NSXPCListener?
-    private var neListener: NSXPCListener?
+    private var listener: NSXPCListener?
     fileprivate var cliConnection: NSXPCConnection?
     public var currentProfilePath: String?
 
@@ -23,22 +22,13 @@ final class ESXPCService: NSObject, PromptService {
     }
 
     func start() {
-        // Listener for CLI connections
-        let cliDelegate = CLIListenerDelegate(service: self)
-        cliListener = NSXPCListener(machServiceName: kTarnESMachServiceName)
-        cliListener?.delegate = cliDelegate
-        // Hold a strong reference to the delegate
-        objc_setAssociatedObject(cliListener!, "delegate", cliDelegate, .OBJC_ASSOCIATION_RETAIN)
-        cliListener?.resume()
-        NSLog("tarn-es: CLI XPC listener started on \(kTarnESMachServiceName)")
-
-        // Listener for NE extension connections
-        let neDelegate = NEListenerDelegate(service: self)
-        neListener = NSXPCListener(machServiceName: kTarnESBridgeMachServiceName)
-        neListener?.delegate = neDelegate
-        objc_setAssociatedObject(neListener!, "delegate", neDelegate, .OBJC_ASSOCIATION_RETAIN)
-        neListener?.resume()
-        NSLog("tarn-es: NE XPC listener started on \(kTarnESBridgeMachServiceName)")
+        let serviceName = kTarnESMachServiceName
+        let delegate = UnifiedListenerDelegate(service: self)
+        listener = NSXPCListener(machServiceName: serviceName)
+        listener?.delegate = delegate
+        objc_setAssociatedObject(listener!, "delegate", delegate, .OBJC_ASSOCIATION_RETAIN)
+        listener?.resume()
+        NSLog("tarn-es: XPC listener started on %@", serviceName)
     }
 
     /// Send an asynchronous prompt request. Used by both ES (via
@@ -107,11 +97,14 @@ final class ESXPCService: NSObject, PromptService {
     }
 }
 
-// MARK: - CLI Listener Delegate
+// MARK: - Unified Listener Delegate
 
-/// Handles XPC connections from the CLI. Sets up bidirectional XPC
-/// with TarnSupervisorXPC (outgoing) and TarnCLICallbackXPC (incoming).
-private final class CLIListenerDelegate: NSObject, NSXPCListenerDelegate {
+/// Accepts both CLI and NE extension connections on the same Mach service.
+/// CLI connections get both TarnSupervisorXPC + TarnCLICallbackXPC interfaces.
+/// NE connections get TarnNetworkEvalXPC only.
+/// Distinguished by audit token: the NE extension runs as root with a
+/// different bundle ID than the CLI.
+private final class UnifiedListenerDelegate: NSObject, NSXPCListenerDelegate {
     weak var service: ESXPCService?
 
     init(service: ESXPCService) {
@@ -123,63 +116,45 @@ private final class CLIListenerDelegate: NSObject, NSXPCListenerDelegate {
         guard let service = service else { return false }
 
         if !validateConnectionTeamID(connection) {
-            NSLog("tarn-es: rejecting CLI XPC connection — team ID mismatch")
+            NSLog("tarn-es: rejecting XPC connection — team ID mismatch (pid %d)", connection.processIdentifier)
             return false
         }
 
-        connection.exportedInterface = NSXPCInterface(with: TarnSupervisorXPC.self)
-        connection.exportedObject = service
-        connection.remoteObjectInterface = NSXPCInterface(with: TarnCLICallbackXPC.self)
+        // Determine connection type: the NE extension runs as root (uid 0),
+        // the CLI runs as the user. Use this to distinguish.
+        let isNEExtension = connection.effectiveUserIdentifier == 0
+            && connection.processIdentifier != getpid()
 
-        connection.invalidationHandler = { [weak service] in
-            guard let service = service else { return }
-            if connection === service.cliConnection {
-                service.cliConnection = nil
-                service.currentProfilePath = nil
-                // F5/F52: Full session teardown
-                DecisionEngine.shared.sessionCache.clear()
-                DecisionEngine.shared.processTree.removeAll()
-                DecisionEngine.shared.configure(config: Config.defaults(), repoPath: "")
-                NSLog("tarn-es: CLI disconnected; full session state reset")
+        if isNEExtension {
+            // NE extension: flow evaluation only
+            connection.exportedInterface = NSXPCInterface(with: TarnNetworkEvalXPC.self)
+            connection.exportedObject = service
+            connection.invalidationHandler = {
+                NSLog("tarn-es: NE extension disconnected")
             }
+            connection.resume()
+            NSLog("tarn-es: NE extension connected (pid %d)", connection.processIdentifier)
+        } else {
+            // CLI: session management + bidirectional prompts
+            connection.exportedInterface = NSXPCInterface(with: TarnSupervisorXPC.self)
+            connection.exportedObject = service
+            connection.remoteObjectInterface = NSXPCInterface(with: TarnCLICallbackXPC.self)
+            connection.invalidationHandler = { [weak service] in
+                guard let service = service else { return }
+                if connection === service.cliConnection {
+                    service.cliConnection = nil
+                    service.currentProfilePath = nil
+                    DecisionEngine.shared.sessionCache.clear()
+                    DecisionEngine.shared.processTree.removeAll()
+                    DecisionEngine.shared.configure(config: Config.defaults(), repoPath: "")
+                    NSLog("tarn-es: CLI disconnected; full session state reset")
+                }
+            }
+            connection.resume()
+            service.cliConnection = connection
+            NSLog("tarn-es: CLI connected (pid %d)", connection.processIdentifier)
         }
 
-        connection.resume()
-        service.cliConnection = connection
-        NSLog("tarn-es: CLI connected (pid %d)", connection.processIdentifier)
-        return true
-    }
-}
-
-// MARK: - NE Extension Listener Delegate
-
-/// Handles XPC connections from the NE extension (TarnSupervisor).
-/// Exposes the TarnNetworkEvalXPC interface for flow evaluation.
-private final class NEListenerDelegate: NSObject, NSXPCListenerDelegate {
-    weak var service: ESXPCService?
-
-    init(service: ESXPCService) {
-        self.service = service
-        super.init()
-    }
-
-    func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
-        guard let service = service else { return false }
-
-        if !validateConnectionTeamID(connection) {
-            NSLog("tarn-es: rejecting NE XPC connection — team ID mismatch")
-            return false
-        }
-
-        connection.exportedInterface = NSXPCInterface(with: TarnNetworkEvalXPC.self)
-        connection.exportedObject = service
-
-        connection.invalidationHandler = {
-            NSLog("tarn-es: NE extension disconnected")
-        }
-
-        connection.resume()
-        NSLog("tarn-es: NE extension connected (pid %d)", connection.processIdentifier)
         return true
     }
 }
