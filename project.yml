@@ -70,6 +70,9 @@ targets:
         CFBundlePackageType: SYSX
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         NSSystemExtensionUsageDescription: Tarn ES extension for file and process supervision
+        MachServices:
+          group.com.witlox.tarn.es: true
+          group.com.witlox.tarn.es.bridge: true
 
   # NE system extension: thin network filter proxy, forwards to TarnES via XPC
   TarnSupervisor:
