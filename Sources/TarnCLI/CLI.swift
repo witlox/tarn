@@ -107,6 +107,7 @@ struct Run: ParsableCommand {
         print("")
 
         let agentPid = try spawnAgent(command: agentCommand, workingDirectory: expandedRepo)
+        client.agentPid = agentPid
         client.registerAgentRoot(sessionId: session.sessionId, pid: agentPid)
 
         let exitCode = waitForAgent(pid: agentPid)
@@ -119,11 +120,11 @@ struct Run: ParsableCommand {
 
 // MARK: - Helpers
 
-/// Launch the agent via posix_spawn for proper TTY inheritance.
-/// Swift's Process() can place the child in a new process group,
-/// making it a background job that can't read from the terminal.
-/// posix_spawn without POSIX_SPAWN_SETPGROUP keeps the child in
-/// our process group, so interactive agents can use the TTY normally.
+/// Launch the agent via posix_spawn in its own process group.
+/// The agent gets its own PGID so we can SIGSTOP/SIGCONT the
+/// entire tree (agent + child processes) during tarn prompts.
+/// We then use tcsetpgrp() to make it the foreground group
+/// so it can do interactive TTY I/O.
 func spawnAgent(command: [String], workingDirectory: String) throws -> pid_t {
     let fullCommand = ["/usr/bin/env"] + command
     let argv: [UnsafeMutablePointer<CChar>?] = fullCommand.map { strdup($0) } + [nil]
@@ -140,6 +141,11 @@ func spawnAgent(command: [String], workingDirectory: String) throws -> pid_t {
 
     var attrs: posix_spawnattr_t?
     posix_spawnattr_init(&attrs)
+    // Put agent in its own process group (PGID = its PID).
+    // This lets us stop the entire tree with kill(-pid, SIGSTOP).
+    let flags: Int16 = Int16(POSIX_SPAWN_SETPGROUP)
+    posix_spawnattr_setflags(&attrs, flags)
+    posix_spawnattr_setpgroup(&attrs, 0)  // 0 = PGID equals child PID
     defer { posix_spawnattr_destroy(&attrs) }
 
     var pid: pid_t = 0

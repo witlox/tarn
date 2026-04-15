@@ -17,7 +17,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
-	<string>3</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>NSSystemExtensionUsageDescription</key>
 	<string>Tarn system extension for file and network supervision</string>
 	<key>NetworkExtension</key>
@@ -26,7 +26,7 @@
 		<string>identifier "com.witlox.tarn.supervisor" and anchor apple generic
 </string>
 		<key>NEMachServiceName</key>
-		<string>$(TeamIdentifierPrefix)com.witlox.tarn.supervisor</string>
+		<string>group.com.witlox.tarn.supervisor</string>
 		<key>NEProviderClasses</key>
 		<dict>
 			<key>com.apple.networkextension.filter-data</key>

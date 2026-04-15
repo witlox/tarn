@@ -95,10 +95,18 @@ final class ESClient {
 
     private func handleAuthOpen(_ message: UnsafePointer<es_message_t>) {
         guard let client = client else { return }
+
+        // Fast path: no supervised session → allow everything instantly.
+        let tree = DecisionEngine.shared.processTree
+        guard tree.count > 0 else {
+            es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
+            return
+        }
+
         let msg = message.pointee
         let pid = audit_token_to_pid(msg.process.pointee.audit_token)
 
-        guard DecisionEngine.shared.processTree.isSupervised(pid: pid) else {
+        guard tree.isSupervised(pid: pid) else {
             es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
             return
         }

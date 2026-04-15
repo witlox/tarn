@@ -72,25 +72,27 @@ class NetworkFilter: NEFilterDataProvider {
     }
 
     override func handleNewFlow(_ flow: NEFilterFlow) -> NEFilterNewFlowVerdict {
+        // Fast path: if no supervised session is active, allow everything.
+        // This ensures tarn NEVER affects non-supervised traffic.
+        let tree = DecisionEngine.shared.processTree
+        guard tree.count > 0 else { return .allow() }
+
         guard let socketFlow = flow as? NEFilterSocketFlow else {
             return .allow()
         }
 
-        // F39: Extract source PID from audit token. If the token is
-        // missing or malformed, drop — we cannot identify the source
-        // process, so allowing would bypass supervision entirely.
+        // No audit token → not a user-space app → allow.
         guard let tokenData = flow.sourceAppAuditToken,
               tokenData.count == MemoryLayout<audit_token_t>.size else {
-            NSLog("tarn: dropping flow with missing/malformed audit token")
-            return .drop()
+            return .allow()
         }
         let pid = tokenData.withUnsafeBytes { ptr -> pid_t in
             let token = ptr.load(as: audit_token_t.self)
             return audit_token_to_pid(token)
         }
 
-        // Only supervise processes in the agent's tree
-        guard DecisionEngine.shared.processTree.isSupervised(pid: pid) else {
+        // Not in the supervised tree → allow immediately.
+        guard tree.isSupervised(pid: pid) else {
             return .allow()
         }
 

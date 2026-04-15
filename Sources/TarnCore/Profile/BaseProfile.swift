@@ -22,6 +22,7 @@ public struct BaseProfile: SecurityProfile {
         "/opt/homebrew/bin",
         "/opt/homebrew/lib",
         "/opt/homebrew/Cellar",
+        "~/.ssh/known_hosts",
     ]
 
     public let readwritePaths: [String] = [

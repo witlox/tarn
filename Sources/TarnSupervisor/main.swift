@@ -2,23 +2,17 @@ import Foundation
 import NetworkExtension
 import TarnCore
 
-// System extension entry point. The extension hosts both the Endpoint
-// Security client (file/process supervision) and the NEFilterDataProvider
-// (network supervision). It listens for XPC connections from the CLI and
-// coordinates the supervised process tree, session cache, and profile
-// across both subsystems.
+// DEV-ONLY standalone entry point for running the supervisor outside
+// the system extension context (requires SIP disabled). Excluded from
+// the Xcode TarnSupervisor target via project.yml.
 //
-// In production, this is launched by macOS as a launchd-managed daemon
-// after the user approves the system extension in System Settings.
-// For development on a SIP-disabled machine, it can be run directly.
-
-// The NEProvider (NEFilterDataProvider) is instantiated by the NE
-// framework; it does not need a manual `main` entry point in the
-// typical NE hosting model. The extension's principal class is
-// declared in Info.plist under NSExtension/NSExtensionPrincipalClass.
+// In production the NE framework provides the entry point: it
+// instantiates NetworkFilter (declared in NEProviderClasses) and
+// calls startFilter(). Having a main() in the sysext binary
+// prevents the NE lifecycle from starting, causing nesessionmanager
+// to timeout and crash-loop the extension.
 //
-// For now, we provide a minimal entry point that keeps the process alive.
-// The actual NEFilterDataProvider subclass is in NetworkFilter.swift.
+// To use: swift build && sudo .build/debug/com.witlox.tarn.supervisor
 
 autoreleasepool {
     // Wire the DecisionEngine to the XPC service so prompt requests

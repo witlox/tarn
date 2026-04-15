@@ -1,65 +1,11 @@
 import Foundation
 
 /// Mach service name for the supervisor's XPC endpoint.
-/// Must match the system extension's Info.plist.
-/// Base mach service name without the team ID prefix.
-/// The NE framework requires the team-prefixed variant
-/// (e.g. "TEAMID.com.witlox.tarn.supervisor") which is
-/// resolved at runtime via the provisioning profile.
-public let kTarnSupervisorMachServiceBase = "com.witlox.tarn.supervisor"
-
-/// Resolved mach service name with team ID prefix.
-/// NE-managed system extensions register their mach service under
-/// "TEAMID.bundleid". This property resolves the team ID at runtime:
-/// 1. From NEMachServiceName in the current bundle's Info.plist (supervisor)
-/// 2. From the running process's code signature (signed CLI)
-/// 3. From the Tarn.app bundle's provisioning profile (tests, unsigned CLI)
-/// 4. Falls back to base name (unit tests without signing)
-public var kTarnSupervisorMachServiceName: String {
-    // Path 1: supervisor reads its own Info.plist
-    if let name = Bundle.main.object(forInfoDictionaryKey: "NEMachServiceName") as? String,
-       !name.isEmpty {
-        return name
-    }
-
-    // Path 2: signed binary reads its own team ID
-    if let team = ownTeamIdentifier() {
-        return "\(team).\(kTarnSupervisorMachServiceBase)"
-    }
-
-    // Path 3: find Tarn.app in /Applications and read its profile
-    if let team = teamFromInstalledApp() {
-        return "\(team).\(kTarnSupervisorMachServiceBase)"
-    }
-
-    return kTarnSupervisorMachServiceBase
-}
-
-private func ownTeamIdentifier() -> String? {
-    var code: SecCode?
-    guard SecCodeCopySelf([], &code) == errSecSuccess, let code = code else { return nil }
-    var staticCode: SecStaticCode?
-    guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let sc = staticCode else { return nil }
-    var info: CFDictionary?
-    guard SecCodeCopySigningInformation(sc, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
-          let dict = info as? [String: Any],
-          let team = dict[kSecCodeInfoTeamIdentifier as String] as? String else { return nil }
-    return team
-}
-
-private func teamFromInstalledApp() -> String? {
-    let appPath = "/Applications/Tarn.app"
-    guard FileManager.default.fileExists(atPath: appPath) else { return nil }
-    var staticCode: SecStaticCode?
-    let url = URL(fileURLWithPath: appPath) as CFURL
-    guard SecStaticCodeCreateWithPath(url, [], &staticCode) == errSecSuccess,
-          let code = staticCode else { return nil }
-    var info: CFDictionary?
-    guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &info) == errSecSuccess,
-          let dict = info as? [String: Any],
-          let team = dict[kSecCodeInfoTeamIdentifier as String] as? String else { return nil }
-    return team
-}
+/// Must match NEMachServiceName in TarnSupervisor-Info.plist.
+/// The NE framework requires this to be prefixed by an app group
+/// from the com.apple.security.application-groups entitlement.
+/// Our app group is "group.com.witlox.tarn".
+public let kTarnSupervisorMachServiceName = "group.com.witlox.tarn.supervisor"
 
 // MARK: - XPC protocols
 

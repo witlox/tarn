@@ -220,7 +220,13 @@ extension XPCService: TarnSupervisorXPC {
             // root's home. Without this, the deny set is broken.
             config.expandAllPaths(userHome: request.userHome)
 
-            DecisionEngine.shared.configure(config: config, repoPath: request.repoPath)
+            // Build agent-specific trusted paths from the profile's
+            // readonly and readwrite entries, expanded with the user's home.
+            let secProfile = agentProfile.profile
+            let agentPaths = (secProfile.readonlyPaths + secProfile.readwritePaths).map { path in
+                path.hasPrefix("~/") ? request.userHome + path.dropFirst(1) : path
+            }
+            DecisionEngine.shared.configure(config: config, repoPath: request.repoPath, agentPaths: agentPaths)
             currentProfilePath = request.profilePath
 
             let response = SessionStartResponse(

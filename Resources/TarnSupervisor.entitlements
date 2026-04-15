@@ -10,7 +10,7 @@
     </array>
     <key>com.apple.security.application-groups</key>
     <array>
-        <string>$(TeamIdentifierPrefix)com.witlox.tarn</string>
+        <string>group.com.witlox.tarn</string>
     </array>
 </dict>
 </plist>

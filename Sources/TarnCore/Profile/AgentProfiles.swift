@@ -7,6 +7,7 @@ public enum AgentProfile {
     case codex
     case gemini
     case opencode
+    case ghyll
     case custom(String)
 
     /// Resolve an agent name string to a profile.
@@ -16,6 +17,7 @@ public enum AgentProfile {
         case "codex": return .codex
         case "gemini": return .gemini
         case "opencode": return .opencode
+        case "ghyll": return .ghyll
         default: return .custom(name)
         }
     }
@@ -31,6 +33,8 @@ public enum AgentProfile {
             return ["gemini", "--yolo"]
         case .opencode:
             return ["opencode"]
+        case .ghyll:
+            return ["ghyll", "run", "."]
         case .custom(let cmd):
             return [cmd]
         }
@@ -43,6 +47,7 @@ public enum AgentProfile {
         case .codex: return CodexProfile()
         case .gemini: return GeminiProfile()
         case .opencode: return OpenCodeProfile()
+        case .ghyll: return GhyllProfile()
         case .custom: return MinimalAgentProfile()
         }
     }
@@ -56,15 +61,21 @@ public struct ClaudeProfile: SecurityProfile {
     public let readonlyPaths: [String] = [
         "~/.claude",
         "~/.config/claude",
+        "~/.gitconfig",
+        "~/.gitignore_global",
     ]
 
     public let readwritePaths: [String] = [
         "~/.claude/projects",
         "~/.claude/statsig",
+        "~/.claude/memory",
+        "~/.claude/settings.json",
+        "~/.claude/todos",
     ]
 
     public let allowedDomains: [String] = [
         "api.anthropic.com",
+        "cdn.anthropic.com",
         "statsig.anthropic.com",
         "sentry.io",
     ]
@@ -76,14 +87,18 @@ public struct CodexProfile: SecurityProfile {
     public let readonlyPaths: [String] = [
         "~/.codex",
         "~/.config/codex",
+        "~/.gitconfig",
+        "~/.gitignore_global",
     ]
 
     public let readwritePaths: [String] = [
-        "~/.codex",
+        "~/.codex/history",
+        "~/.codex/cache",
     ]
 
     public let allowedDomains: [String] = [
         "api.openai.com",
+        "cdn.openai.com",
     ]
 }
 
@@ -93,15 +108,19 @@ public struct GeminiProfile: SecurityProfile {
     public let readonlyPaths: [String] = [
         "~/.gemini",
         "~/.config/gemini",
+        "~/.gitconfig",
+        "~/.gitignore_global",
     ]
 
     public let readwritePaths: [String] = [
-        "~/.gemini",
+        "~/.gemini/history",
+        "~/.gemini/cache",
     ]
 
     public let allowedDomains: [String] = [
         "generativelanguage.googleapis.com",
         "aistudio.google.com",
+        "alkalimakersuite-pa.clients6.google.com",
     ]
 }
 
@@ -110,16 +129,45 @@ public struct OpenCodeProfile: SecurityProfile {
 
     public let readonlyPaths: [String] = [
         "~/.config/opencode",
+        "~/.gitconfig",
+        "~/.gitignore_global",
     ]
 
     public let readwritePaths: [String] = [
-        "~/.config/opencode",
+        "~/.config/opencode/history",
+        "~/.config/opencode/cache",
     ]
 
     public let allowedDomains: [String] = [
         "api.anthropic.com",
         "api.openai.com",
         "generativelanguage.googleapis.com",
+    ]
+}
+
+public struct GhyllProfile: SecurityProfile {
+    public let name = "agent-ghyll"
+
+    public let readonlyPaths: [String] = [
+        "~/.ghyll",
+        "~/.gitconfig",
+        "~/.gitignore_global",
+    ]
+
+    public let readwritePaths: [String] = [
+        "~/.ghyll/memory.db",
+        "~/.ghyll/memory.db-wal",
+        "~/.ghyll/memory.db-shm",
+        "~/.ghyll/keys",
+        "~/.ghyll/vault.db",
+    ]
+
+    // Ghyll connects to self-hosted model endpoints configured in
+    // ~/.ghyll/config.toml. Domains are user-specific so we only
+    // include the known defaults (embedding model, web search).
+    public let allowedDomains: [String] = [
+        "huggingface.co",
+        "html.duckduckgo.com",
     ]
 }
 

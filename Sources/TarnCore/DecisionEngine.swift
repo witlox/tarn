@@ -15,6 +15,7 @@ public final class DecisionEngine {
     public let sessionCache = SessionCache()
     private var _config = Config.defaults()
     private var _repoPath: String = ""
+    private var _agentPaths: [String] = []
     private let configLock = NSLock()
 
     /// Tracks in-flight prompt cache keys and waiting callbacks.
@@ -47,11 +48,18 @@ public final class DecisionEngine {
         return _repoPath
     }
 
+    public var agentPaths: [String] {
+        configLock.lock()
+        defer { configLock.unlock() }
+        return _agentPaths
+    }
+
     /// Configure the engine for a new session. Clears all prior state.
-    public func configure(config: Config, repoPath: String) {
+    public func configure(config: Config, repoPath: String, agentPaths: [String] = []) {
         configLock.lock()
         _config = config
         _repoPath = repoPath
+        _agentPaths = agentPaths
         configLock.unlock()
         sessionCache.clear()
         processTree.removeAll()
@@ -173,7 +181,7 @@ public final class DecisionEngine {
 
     /// Check if a path is in a trusted region.
     public func isInTrustedRegion(path: String, isWrite: Bool) -> Bool {
-        TrustedRegions.isTrusted(path: path, repoPath: repoPath, isWrite: isWrite)
+        TrustedRegions.isTrusted(path: path, repoPath: repoPath, agentPaths: agentPaths, isWrite: isWrite)
     }
 
     public func makePromptMessage(request: AccessRequest) -> PromptRequestMessage {
