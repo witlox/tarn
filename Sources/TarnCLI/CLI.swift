@@ -128,7 +128,13 @@ struct Run: ParsableCommand {
         let agentPid = try spawnAgent(command: agentCommand, workingDirectory: expandedRepo)
         client.agentPid = agentPid
         client.confirmAgentPID(sessionId: session.sessionId, pid: agentPid)
-        // F-01: Resume the suspended agent now that it is registered.
+
+        // Give the agent the terminal foreground BEFORE resuming.
+        // Otherwise it gets SIGTTIN (background read) and stops.
+        tcsetpgrp(STDIN_FILENO, agentPid)
+
+        // F-01: Resume the suspended agent now that it is registered
+        // and has the terminal foreground.
         kill(agentPid, SIGCONT)
 
         let exitCode = waitForAgent(pid: agentPid)
@@ -200,12 +206,9 @@ func spawnAgent(command: [String], workingDirectory: String) throws -> pid_t {
 }
 
 /// Wait for the agent process to exit, managing terminal foreground.
+/// Note: tcsetpgrp is called BEFORE SIGCONT in Run.run(), not here.
 func waitForAgent(pid: pid_t) -> Int32 {
-    // Give the agent the foreground terminal for interactive I/O
     let savedPgrp = tcgetpgrp(STDIN_FILENO)
-    if savedPgrp >= 0 {
-        tcsetpgrp(STDIN_FILENO, pid)
-    }
 
     var status: Int32 = 0
     waitpid(pid, &status, 0)

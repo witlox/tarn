@@ -59,18 +59,14 @@ public struct ClaudeProfile: SecurityProfile {
     public let name = "agent-claude"
 
     public let readonlyPaths: [String] = [
-        "~/.claude",
+        "~/.claude.json",
         "~/.config/claude",
         "~/.gitconfig",
         "~/.gitignore_global",
     ]
 
     public let readwritePaths: [String] = [
-        "~/.claude/projects",
-        "~/.claude/statsig",
-        "~/.claude/memory",
-        "~/.claude/settings.json",
-        "~/.claude/todos",
+        "~/.claude",
     ]
 
     public let allowedDomains: [String] = [

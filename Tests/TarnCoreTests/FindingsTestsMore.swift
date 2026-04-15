@@ -253,20 +253,15 @@ final class AgentReadonlyWriteDenyTests: XCTestCase {
         )
         config.expandAllPaths(userHome: "/Users/dev")
 
-        // ~/.claude is in ClaudeProfile.readonlyPaths, but ~/.claude/config.json
-        // is NOT explicitly listed. With exact matching, Config.check() returns nil.
-        // With directory prefix matching (F-19 fix), it would return .deny.
-        // This is the G2-04 attack: write falls through to prompt.
+        // ~/.claude is in ClaudeProfile.readwritePaths (agents need full
+        // write access to their config dir). Test that writes are allowed.
         let req = AccessRequest(
             kind: .fileWrite(path: "/Users/dev/.claude/config.json"),
             pid: 1, processPath: "/usr/bin/claude"
         )
 
         let result = config.check(request: req)
-        // Currently FAILS: returns nil (prompts user) because exact match fails.
-        // After fix (F-19 directory prefix matching applied to readonlyPaths):
-        // should return .deny because ~/.claude is readonly.
-        XCTAssertEqual(result, .deny,
-                       "G2-04: Write to child of agent readonly dir should be denied, not prompted")
+        XCTAssertEqual(result, .allow,
+                       "G2-04: Write to agent readwrite dir should be allowed")
     }
 }

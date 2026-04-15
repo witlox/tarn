@@ -27,7 +27,9 @@ public final class DecisionEngine {
 
     /// Deadline for ES AUTH event responses. ES kills the client if
     /// a response takes longer than ~30 s. We auto-deny at 25 s.
-    public var esDeadlineSeconds: Double = 25.0
+    /// ES kernel deadline varies by macOS version (~15-30s).
+    /// Use 10s to be safe — auto-deny before the kernel kills us.
+    public var esDeadlineSeconds: Double = 10.0
 
     /// Prompt service for interactive decisions and persistence.
     /// In production: XPCService. In tests: MockPromptService.

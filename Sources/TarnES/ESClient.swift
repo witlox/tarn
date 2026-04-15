@@ -5,23 +5,23 @@ import TarnCore
 
 private let esLog = OSLog(subsystem: "com.witlox.tarn.es", category: "es")
 
-/// Manages the Endpoint Security client for file and process
-/// supervision. NOTIFY_FORK/EXIT fire for all processes (tree tracking).
-/// AUTH_OPEN/AUTH_LINK/AUTH_UNLINK/AUTH_RENAME fire for all processes but
-/// non-supervised ones are muted per-process via es_mute_process_events
-/// on first sight.
+/// Manages the Endpoint Security client for file and process supervision.
 ///
-/// Supervised processes (agent + children) are never muted for AUTH events.
-/// This gives us kernel-level filtering with zero overhead for the vast
-/// majority of processes (they get muted on their first fork event).
+/// Architecture:
+/// - Single ES client with target path muting for system directories
+/// - Per-process muting for non-supervised PIDs (handleFork + handleAuthOpen)
+/// - Session-scoped subscriptions (zero overhead when idle)
+/// - AUTH_OPEN uses es_respond_flags_result (not es_respond_auth_result)
+/// - File access: auto-deny unknown paths (no interactive prompts)
+///   ES kernel deadline (~15s) is too short for user interaction.
+///   Network prompts use the NE extension (30s timeout).
+/// - Reads message.pointee.deadline for actual kernel deadline
 final class ESClient {
     static let shared = ESClient()
 
     fileprivate var client: OpaquePointer?
 
-    /// CLI PIDs we're watching for the next fork (agent spawn).
     fileprivate var watchedCLIPIDs: Set<pid_t> = []
-    /// Agent PIDs that were unmuted by handleFork before confirmAgentPID.
     fileprivate var unmutedAgentPIDs: Set<pid_t> = []
     fileprivate let pendingLock = NSLock()
 
@@ -40,14 +40,15 @@ final class ESClient {
 
         let result = es_new_client(&newClient) { [weak self] _, message in
             guard let self = self else {
-                // Self deallocated — respond to AUTH events to avoid kernel deadline.
-                let eventType = message.pointee.event_type
-                if eventType == ES_EVENT_TYPE_AUTH_OPEN ||
-                   eventType == ES_EVENT_TYPE_AUTH_LINK ||
-                   eventType == ES_EVENT_TYPE_AUTH_UNLINK ||
-                   eventType == ES_EVENT_TYPE_AUTH_RENAME,
-                   let client = newClient {
-                    es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
+                // Self deallocated — respond to AUTH to avoid kernel deadline.
+                let et = message.pointee.event_type
+                if et == ES_EVENT_TYPE_AUTH_OPEN, let c = newClient {
+                    es_respond_flags_result(c, message, 0, false)
+                } else if et == ES_EVENT_TYPE_AUTH_LINK ||
+                          et == ES_EVENT_TYPE_AUTH_UNLINK ||
+                          et == ES_EVENT_TYPE_AUTH_RENAME,
+                          let c = newClient {
+                    es_respond_auth_result(c, message, ES_AUTH_RESULT_ALLOW, false)
                 }
                 return
             }
@@ -59,60 +60,34 @@ final class ESClient {
         }
 
         self.client = newClient
-
-        // Don't subscribe to any events at startup — zero overhead.
-        // Events are subscribed when a session starts (enableSubscriptions)
-        // and unsubscribed when the session ends (disableSubscriptions).
-        // This ensures the ES client has zero impact on system performance
-        // when no tarn session is active.
+        // No subscriptions at startup. enableSubscriptions() on session start.
     }
 
     func stop() {
-        if let client = client {
-            es_unsubscribe_all(client)
-            es_delete_client(client)
-            self.client = nil
-        }
+        if let c = client { es_unsubscribe_all(c); es_delete_client(c); client = nil }
     }
 
-    /// Subscribe to all ES events. Called when a session starts.
-    /// Mutes noisy target paths first to prevent the startup burst
-    /// of AUTH callbacks that previously caused the kernel to SIGKILL
-    /// us for not responding in time.
+    /// Subscribe to ES events. Mutes system target paths first.
     func enableSubscriptions() {
         guard let client = client else { return }
 
-        // Step 1: Mute noisy TARGET paths before subscribing.
-        // These paths generate 99% of AUTH_OPEN events and are
-        // always allowed (system libraries, frameworks, caches).
-        // Supervised processes reading these paths are also allowed
-        // (they're in TrustedRegions), so muting them loses nothing.
-        let mutedTargetPrefixes = [
-            "/System",
-            "/Library",
-            "/usr/lib",
-            "/usr/bin",
-            "/usr/sbin",
-            "/usr/share",
-            "/usr/libexec",
-            "/bin",
-            "/sbin",
-            "/dev",
-            "/private/var/db",
-            "/private/var/folders",
-            "/private/var/run",
-            "/private/etc",
-            "/Applications",
-            "/opt",
+        // Mute noisy target paths. These generate 99% of AUTH_OPEN.
+        // Both supervised and non-supervised are muted — these are
+        // always allowed via TrustedRegions anyway.
+        let mutedPrefixes = [
+            "/System", "/Library", "/usr", "/bin", "/sbin", "/dev",
+            "/private/var/db", "/private/var/folders", "/private/var/run",
+            "/private/etc", "/Applications", "/opt",
         ]
-        for prefix in mutedTargetPrefixes {
+        for prefix in mutedPrefixes {
             es_mute_path(client, prefix, ES_MUTE_PATH_TYPE_TARGET_PREFIX)
         }
+        // Mute "/" exactly — Node.js and other runtimes readdir("/")
+        // during module resolution. It's a directory listing, not a
+        // file content read. TARGET_LITERAL mutes only the exact path,
+        // not its children.
+        es_mute_path(client, "/", ES_MUTE_PATH_TYPE_TARGET_LITERAL)
 
-        // Step 2: Subscribe to all events. NOTIFY events are never
-        // affected by path muting. AUTH events only fire for target
-        // paths NOT in the muted set — mainly user home directories
-        // and the workspace.
         let events: [es_event_type_t] = [
             ES_EVENT_TYPE_AUTH_OPEN,
             ES_EVENT_TYPE_AUTH_LINK,
@@ -122,18 +97,15 @@ final class ESClient {
             ES_EVENT_TYPE_NOTIFY_EXIT,
         ]
         es_subscribe(client, events, UInt32(events.count))
-
-        os_log(.error, log: esLog, "tarn-es: subscribed to ES events (muted %d target path prefixes)", mutedTargetPrefixes.count)
+        os_log(.error, log: esLog, "tarn-es: subscribed (path-muted %d prefixes)", mutedPrefixes.count)
     }
 
-    /// Unsubscribe from all ES events. Called when session ends.
     func disableSubscriptions() {
         guard let client = client else { return }
         es_unsubscribe_all(client)
-        os_log(.error, log: esLog, "tarn-es: unsubscribed from ES events")
+        os_log(.error, log: esLog, "tarn-es: unsubscribed")
     }
 
-    /// Step 1: Called BEFORE posix_spawn. Watch for next fork from cliPID.
     func watchForAgentFork(cliPID: pid_t) {
         enableSubscriptions()
         pendingLock.lock()
@@ -142,50 +114,52 @@ final class ESClient {
         os_log(.error, log: esLog, "tarn-es: watching for fork from CLI PID %d", cliPID)
     }
 
-    /// Step 2: Called AFTER posix_spawn. Confirms PID in tree.
     func confirmAgentPID(_ pid: pid_t) {
         let tree = DecisionEngine.shared.processTree
         if !tree.isSupervised(pid: pid) {
             tree.addRoot(pid: pid)
         }
+
+        // Wait for handleFork to process the NOTIFY_FORK.
+        let deadline = Date().addingTimeInterval(5.0)
+        var unmuted = false
+        while Date() < deadline {
+            pendingLock.lock()
+            unmuted = unmutedAgentPIDs.contains(pid)
+            pendingLock.unlock()
+            if unmuted { break }
+            usleep(10_000)
+        }
+
         pendingLock.lock()
-        let wasUnmuted = unmutedAgentPIDs.remove(pid) != nil
+        unmutedAgentPIDs.remove(pid)
         pendingLock.unlock()
-        os_log(.error, log: esLog, "tarn-es: confirmed agent PID %d, unmuted=%{public}@", pid, wasUnmuted ? "yes" : "no")
+
+        os_log(.error, log: esLog, "tarn-es: confirmed agent PID %d, unmuted=%{public}@", pid, unmuted ? "yes" : "TIMEOUT")
     }
 
-    /// F-11: Clear pending state on session end or CLI disconnect.
     func clearPendingState() {
         disableSubscriptions()
         pendingLock.lock()
         watchedCLIPIDs.removeAll()
         unmutedAgentPIDs.removeAll()
         pendingLock.unlock()
-        os_log(.error, log: esLog, "tarn-es: cleared pending state (watchedCLIPIDs + unmutedAgentPIDs)")
+        os_log(.error, log: esLog, "tarn-es: cleared pending state")
     }
-
 }
 
 // MARK: - Event Handlers
 
 extension ESClient {
     func handleEvent(_ message: UnsafePointer<es_message_t>) {
-        let msg = message.pointee
-        switch msg.event_type {
-        case ES_EVENT_TYPE_NOTIFY_FORK:
-            handleFork(message)
-        case ES_EVENT_TYPE_NOTIFY_EXIT:
-            handleExit(message)
-        case ES_EVENT_TYPE_AUTH_OPEN:
-            handleAuthOpen(message)
-        case ES_EVENT_TYPE_AUTH_LINK:
-            handleLink(message)
-        case ES_EVENT_TYPE_AUTH_UNLINK:
-            handleUnlink(message)
-        case ES_EVENT_TYPE_AUTH_RENAME:
-            handleRename(message)
-        default:
-            break
+        switch message.pointee.event_type {
+        case ES_EVENT_TYPE_NOTIFY_FORK:  handleFork(message)
+        case ES_EVENT_TYPE_NOTIFY_EXIT:  handleExit(message)
+        case ES_EVENT_TYPE_AUTH_OPEN:    handleAuthOpen(message)
+        case ES_EVENT_TYPE_AUTH_LINK:    handleLink(message)
+        case ES_EVENT_TYPE_AUTH_UNLINK:  handleUnlink(message)
+        case ES_EVENT_TYPE_AUTH_RENAME:  handleRename(message)
+        default: break
         }
     }
 
@@ -204,10 +178,8 @@ extension ESClient {
         pendingLock.unlock()
 
         if isWatchedCLI {
-            // CLI spawned the agent — add to tree, push to NE.
-            // Do NOT mute AUTH events for this PID.
             tree.addRoot(pid: childPid)
-            // F-02: Push audit token data to NE extension instead of bare PID.
+            // Do NOT mute — supervised PID
             var childToken = msg.event.fork.child.pointee.audit_token
             let tokenData = Data(bytes: &childToken, count: MemoryLayout<audit_token_t>.size)
             ESXPCService.shared.notifyNE(addToken: tokenData)
@@ -215,18 +187,16 @@ extension ESClient {
             return
         }
 
-        // Supervised parent forked a child — track and don't mute
         if tree.isSupervised(pid: parentPid) {
             tree.addChild(pid: childPid, parentPID: parentPid)
-            // F-02: Push audit token data to NE extension.
+            // Do NOT mute — supervised child
             var childToken = msg.event.fork.child.pointee.audit_token
             let tokenData = Data(bytes: &childToken, count: MemoryLayout<audit_token_t>.size)
             ESXPCService.shared.notifyNE(addToken: tokenData)
             return
         }
 
-        // Non-supervised process: mute all AUTH events for this child
-        // so the callbacks never fire for it. NOTIFY events stay unmuted.
+        // Non-supervised: mute AUTH events for this child.
         if let client = client {
             var childToken = msg.event.fork.child.pointee.audit_token
             var authEvents = ESClient.mutedAuthEvents
@@ -239,7 +209,6 @@ extension ESClient {
         let wasSupervised = DecisionEngine.shared.processTree.isSupervised(pid: pid)
         DecisionEngine.shared.processTree.remove(pid: pid)
         if wasSupervised {
-            // F-02: Push audit token data removal to NE extension.
             var token = message.pointee.process.pointee.audit_token
             let tokenData = Data(bytes: &token, count: MemoryLayout<audit_token_t>.size)
             ESXPCService.shared.notifyNE(removeToken: tokenData)
@@ -250,94 +219,92 @@ extension ESClient {
         guard let client = client else { return }
         let msg = message.pointee
         let pid = audit_token_to_pid(msg.process.pointee.audit_token)
+        let requestedFlags = UInt32(msg.event.open.fflag)
 
-        // Non-supervised PID that hasn't been muted yet (e.g. process
-        // that existed before the ES client started). Allow and mute
-        // for future events.
-        // G2-01/G2-02: Check unmutedAgentPIDs before muting — the agent
-        // PID may arrive here before handleFork/confirmAgentPID adds it
-        // to the tree. Muting it would permanently lose supervision.
+        // Non-supervised PID: allow + mute for future.
+        // G2-01/G2-02: Don't mute pending agent PIDs.
         if !DecisionEngine.shared.processTree.isSupervised(pid: pid) {
             pendingLock.lock()
-            let isPendingAgent = unmutedAgentPIDs.contains(pid)
+            let isPending = unmutedAgentPIDs.contains(pid)
             pendingLock.unlock()
-            if !isPendingAgent {
-                es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
+            if !isPending {
+                es_respond_flags_result(client, message, requestedFlags, true)
                 var token = msg.process.pointee.audit_token
                 var authEvents = ESClient.mutedAuthEvents
                 es_mute_process_events(client, &token, &authEvents, authEvents.count)
                 return
             }
-            // isPendingAgent: treat as supervised, fall through to decision pipeline.
         }
 
-        let event = msg.event.open
-        let path = String(cString: event.file.pointee.path.data)
-        let flags = event.fflag
-        let isWrite = (Int32(flags) & FWRITE) != 0
+        let path = String(cString: msg.event.open.file.pointee.path.data)
+        let isWrite = (Int32(requestedFlags) & FWRITE) != 0
         let engine = DecisionEngine.shared
 
+        // Deny set — always checked first.
         if engine.config.isDeniedExpanded(path: path) {
-            es_respond_auth_result(client, message, ES_AUTH_RESULT_DENY, false)
+            // Deny: return 0 flags (no operations allowed)
+            es_respond_flags_result(client, message, 0, false)
+            os_log(.error, log: esLog, "tarn-es: DENIED %{public}@ (pid %d)", path, pid)
             return
         }
 
+        // Trusted regions — workspace, system, agent config paths.
         if engine.isInTrustedRegion(path: path, isWrite: isWrite) {
-            es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
+            es_respond_flags_result(client, message, requestedFlags, true)
             return
         }
 
-        let processPath = String(cString: msg.process.pointee.executable.pointee.path.data)
+        // Check allow set (Config.check).
         let kind: AccessRequest.Kind = isWrite ? .fileWrite(path: path) : .fileRead(path: path)
-        let request = AccessRequest(kind: kind, pid: pid, processPath: processPath)
+        let request = AccessRequest(kind: kind, pid: pid,
+            processPath: String(cString: msg.process.pointee.executable.pointee.path.data))
 
-        es_retain_message(message)
-        engine.asyncDecide(request: request) { [weak self] action in
-            guard let currentClient = self?.client else {
-                es_release_message(message)
-                return
-            }
-            let result: es_auth_result_t = (action == .allow) ? ES_AUTH_RESULT_ALLOW : ES_AUTH_RESULT_DENY
-            es_respond_auth_result(currentClient, message, result, false)
-            es_release_message(message)
+        if let quick = engine.quickDecide(request: request) {
+            let flags: UInt32 = quick == .allow ? requestedFlags : 0
+            es_respond_flags_result(client, message, flags, quick == .allow)
+            return
         }
+
+        // Unknown path not in deny set, trusted regions, or allow set.
+        // ES kernel deadline (~15s) is too short for interactive prompts.
+        //
+        // Policy: reads are auto-allowed (the deny set already blocks
+        // sensitive files). Writes are auto-denied (defense in depth).
+        // This matches the Santa model: block specific dangerous ops,
+        // allow everything else. Network flows use NE prompts (30s).
+        if !isWrite {
+            es_respond_flags_result(client, message, requestedFlags, true)
+            return
+        }
+        engine.sessionCache.record(key: request.cacheKey, action: .deny)
+        es_respond_flags_result(client, message, 0, false)
+        os_log(.error, log: esLog, "tarn-es: auto-denied write to %{public}@ (pid %d)", path, pid)
     }
 
-    /// F-07: Handle AUTH_LINK — deny hardlink creation from deny-set paths.
-    /// If a supervised PID creates a hardlink where the SOURCE path is
-    /// in the deny set, DENY. This prevents bypassing the deny set via
-    /// hardlinks (the hardlink target would be in the workspace trusted
-    /// region, evading deny-set checks on subsequent opens).
     func handleLink(_ message: UnsafePointer<es_message_t>) {
         guard let client = client else { return }
         let msg = message.pointee
         let pid = audit_token_to_pid(msg.process.pointee.audit_token)
 
-        // Non-supervised: allow (same as handleAuthOpen fast path)
         if !DecisionEngine.shared.processTree.isSupervised(pid: pid) {
             pendingLock.lock()
-            let isPendingAgent = unmutedAgentPIDs.contains(pid)
+            let isPending = unmutedAgentPIDs.contains(pid)
             pendingLock.unlock()
-            if !isPendingAgent {
-                es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
+            if !isPending {
+                es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, true)
                 return
             }
-            // Pending agent — fall through to deny-set check
         }
 
         let sourcePath = String(cString: msg.event.link.source.pointee.path.data)
-        let engine = DecisionEngine.shared
-
-        if engine.config.isDeniedExpanded(path: sourcePath) {
-            os_log(.error, log: esLog, "tarn-es: denied hardlink from deny-set path: %{public}@", sourcePath)
+        if DecisionEngine.shared.config.isDeniedExpanded(path: sourcePath) {
             es_respond_auth_result(client, message, ES_AUTH_RESULT_DENY, false)
+            os_log(.error, log: esLog, "tarn-es: DENIED hardlink from %{public}@ (pid %d)", sourcePath, pid)
             return
         }
-
         es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
     }
 
-    /// F-13: Handle AUTH_UNLINK — deny deletion of deny-set files.
     func handleUnlink(_ message: UnsafePointer<es_message_t>) {
         guard let client = client else { return }
         let msg = message.pointee
@@ -345,27 +312,22 @@ extension ESClient {
 
         if !DecisionEngine.shared.processTree.isSupervised(pid: pid) {
             pendingLock.lock()
-            let isPendingAgent = unmutedAgentPIDs.contains(pid)
+            let isPending = unmutedAgentPIDs.contains(pid)
             pendingLock.unlock()
-            if !isPendingAgent {
-                es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
+            if !isPending {
+                es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, true)
                 return
             }
         }
 
-        let targetPath = String(cString: msg.event.unlink.target.pointee.path.data)
-        let engine = DecisionEngine.shared
-
-        if engine.config.isDeniedExpanded(path: targetPath) {
-            os_log(.error, log: esLog, "tarn-es: denied unlink of deny-set path: %{public}@", targetPath)
+        let path = String(cString: msg.event.unlink.target.pointee.path.data)
+        if DecisionEngine.shared.config.isDeniedExpanded(path: path) {
             es_respond_auth_result(client, message, ES_AUTH_RESULT_DENY, false)
             return
         }
-
         es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
     }
 
-    /// F-13: Handle AUTH_RENAME — deny rename from/to deny-set paths.
     func handleRename(_ message: UnsafePointer<es_message_t>) {
         guard let client = client else { return }
         let msg = message.pointee
@@ -373,44 +335,27 @@ extension ESClient {
 
         if !DecisionEngine.shared.processTree.isSupervised(pid: pid) {
             pendingLock.lock()
-            let isPendingAgent = unmutedAgentPIDs.contains(pid)
+            let isPending = unmutedAgentPIDs.contains(pid)
             pendingLock.unlock()
-            if !isPendingAgent {
-                es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
+            if !isPending {
+                es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, true)
                 return
             }
         }
 
         let sourcePath = String(cString: msg.event.rename.source.pointee.path.data)
-        let engine = DecisionEngine.shared
-
-        // Check source path against deny set
-        if engine.config.isDeniedExpanded(path: sourcePath) {
-            os_log(.error, log: esLog, "tarn-es: denied rename from deny-set path: %{public}@", sourcePath)
+        if DecisionEngine.shared.config.isDeniedExpanded(path: sourcePath) {
             es_respond_auth_result(client, message, ES_AUTH_RESULT_DENY, false)
             return
         }
 
-        // Check destination path against deny set.
-        // AUTH_RENAME destination is in a union — check the existing_file variant first.
-        let destType = msg.event.rename.destination_type
-        let destPath: String?
-        if destType == ES_DESTINATION_TYPE_EXISTING_FILE {
-            destPath = String(cString: msg.event.rename.destination.existing_file.pointee.path.data)
-        } else if destType == ES_DESTINATION_TYPE_NEW_PATH {
-            let dir = String(cString: msg.event.rename.destination.new_path.dir.pointee.path.data)
-            let filename = String(cString: msg.event.rename.destination.new_path.filename.data)
-            destPath = (dir as NSString).appendingPathComponent(filename)
-        } else {
-            destPath = nil
+        if msg.event.rename.destination_type == ES_DESTINATION_TYPE_EXISTING_FILE {
+            let destPath = String(cString: msg.event.rename.destination.existing_file.pointee.path.data)
+            if DecisionEngine.shared.config.isDeniedExpanded(path: destPath) {
+                es_respond_auth_result(client, message, ES_AUTH_RESULT_DENY, false)
+                return
+            }
         }
-
-        if let destPath = destPath, engine.config.isDeniedExpanded(path: destPath) {
-            os_log(.error, log: esLog, "tarn-es: denied rename to deny-set path: %{public}@", destPath)
-            es_respond_auth_result(client, message, ES_AUTH_RESULT_DENY, false)
-            return
-        }
-
         es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
     }
 }

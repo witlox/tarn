@@ -91,7 +91,7 @@ final class ProfileScenarioTests: XCTestCase {
     func testClaudeProfileIncludesAnthropicAPI() {
         let profile = ClaudeProfile()
         XCTAssertTrue(profile.allowedDomains.contains("api.anthropic.com"))
-        XCTAssertTrue(profile.readonlyPaths.contains("~/.claude"))
+        XCTAssertTrue(profile.readwritePaths.contains("~/.claude"))
     }
 
     // Scenario: Codex agent profile includes OpenAI API

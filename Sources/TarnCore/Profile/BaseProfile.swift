@@ -49,7 +49,9 @@ public struct BaseProfile: SecurityProfile {
         "~/.azure",
         "~/.npmrc",
         "~/.pypirc",
-        "~/Library/Keychains",
+        // Note: ~/Library/Keychains NOT denied. macOS Security framework
+        // protects keychain items with ACLs (password/TouchID required).
+        // ES-level blocking prevents TLS certificate validation.
         "~/Library/Cookies",
         "~/Library/Safari",
         "~/.config/op",
