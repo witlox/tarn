@@ -2,57 +2,37 @@ import Foundation
 import TarnCore
 
 /// XPC client that connects to the ES system extension and forwards
-/// network flow evaluations. The NE filter uses this to delegate all
-/// decision-making to the ES extension, which hosts the DecisionEngine,
-/// ProcessTree, SessionCache, and Config.
+/// network flow evaluations. Also receives supervised PID notifications
+/// from the ES extension so the NE filter only intercepts flows from
+/// supervised processes — same pattern as ES inverted muting.
 ///
 /// SAFETY: All error paths fail-open (.allow). The NE filter must NEVER
-/// block traffic it cannot evaluate. A timeout ensures we don't wait
-/// forever if the ES extension hangs.
-final class ESBridgeClient {
+/// block traffic it cannot evaluate.
+final class ESBridgeClient: NSObject {
     static let shared = ESBridgeClient()
     private var connection: NSXPCConnection?
 
     /// Timeout for ES extension responses. If exceeded, allow the flow.
     private let evaluateTimeout: TimeInterval = 2.0
 
-    /// Supervised PIDs, synchronized from ES extension responses.
-    /// The NE filter checks this to skip XPC for non-supervised flows.
+    /// Supervised PIDs, pushed by the ES extension via TarnNECallbackXPC.
+    /// Only flows from these PIDs are paused and forwarded for evaluation.
     private var supervisedPIDs: Set<Int32> = []
     private let pidLock = NSLock()
 
-    /// Check if a PID might be supervised. If no session is active
-    /// (empty set), returns false and the NE filter allows immediately.
+    /// Check if a PID is supervised. If not, the NE filter allows immediately.
     func isSupervised(pid: Int32) -> Bool {
         pidLock.lock()
         defer { pidLock.unlock() }
         return supervisedPIDs.contains(pid)
     }
 
-    /// Register a PID as supervised (called when ES extension confirms).
-    func addSupervisedPID(_ pid: Int32) {
-        pidLock.lock()
-        supervisedPIDs.insert(pid)
-        pidLock.unlock()
-    }
-
-    /// Clear all supervised PIDs (session ended).
-    func clearSupervisedPIDs() {
-        pidLock.lock()
-        supervisedPIDs.removeAll()
-        pidLock.unlock()
-    }
-
-    /// Whether any session is active.
-    var hasActiveSession: Bool {
-        pidLock.lock()
-        defer { pidLock.unlock() }
-        return !supervisedPIDs.isEmpty
-    }
-
     func connect() {
-        let conn = NSXPCConnection(machServiceName: kTarnESBridgeMachServiceName)
+        let conn = NSXPCConnection(machServiceName: kTarnESMachServiceName)
         conn.remoteObjectInterface = NSXPCInterface(with: TarnNetworkEvalXPC.self)
+        // Export callback interface so ES extension can push PID updates
+        conn.exportedInterface = NSXPCInterface(with: TarnNECallbackXPC.self)
+        conn.exportedObject = self
         conn.invalidationHandler = { [weak self] in
             self?.connection = nil
         }
@@ -92,16 +72,34 @@ final class ESBridgeClient {
             safeReply(.allow)
         }
 
-        proxy.evaluateFlow(data) { [weak self] responseData in
+        proxy.evaluateFlow(data) { responseData in
             guard let response = try? JSONDecoder().decode(NetworkFlowResponse.self, from: responseData) else {
                 safeReply(.allow)
                 return
             }
-            // Learn supervised PIDs from ES extension responses
-            if response.supervised {
-                self?.addSupervisedPID(request.pid)
-            }
             safeReply(response.action == "allow" ? .allow : .deny)
         }
+    }
+}
+
+// MARK: - PID notifications from ES extension
+
+extension ESBridgeClient: TarnNECallbackXPC {
+    func addSupervisedPID(_ pid: Int32) {
+        pidLock.lock()
+        supervisedPIDs.insert(pid)
+        pidLock.unlock()
+    }
+
+    func removeSupervisedPID(_ pid: Int32) {
+        pidLock.lock()
+        supervisedPIDs.remove(pid)
+        pidLock.unlock()
+    }
+
+    func clearSupervisedPIDs() {
+        pidLock.lock()
+        supervisedPIDs.removeAll()
+        pidLock.unlock()
     }
 }

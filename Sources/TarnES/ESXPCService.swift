@@ -15,10 +15,29 @@ final class ESXPCService: NSObject, PromptService {
 
     private var listener: NSXPCListener?
     fileprivate var cliConnection: NSXPCConnection?
+    fileprivate var neConnection: NSXPCConnection?
     public var currentProfilePath: String?
 
     private override init() {
         super.init()
+    }
+
+    /// Push a supervised PID to the NE extension.
+    func notifyNE(addPID pid: Int32) {
+        guard let proxy = neConnection?.remoteObjectProxy as? TarnNECallbackXPC else { return }
+        proxy.addSupervisedPID(pid)
+    }
+
+    /// Remove a supervised PID from the NE extension.
+    func notifyNE(removePID pid: Int32) {
+        guard let proxy = neConnection?.remoteObjectProxy as? TarnNECallbackXPC else { return }
+        proxy.removeSupervisedPID(pid)
+    }
+
+    /// Clear all supervised PIDs in the NE extension.
+    func notifyNEClearAll() {
+        guard let proxy = neConnection?.remoteObjectProxy as? TarnNECallbackXPC else { return }
+        proxy.clearSupervisedPIDs()
     }
 
     func start() {
@@ -126,13 +145,16 @@ private final class UnifiedListenerDelegate: NSObject, NSXPCListenerDelegate {
             && connection.processIdentifier != getpid()
 
         if isNEExtension {
-            // NE extension: flow evaluation only
+            // NE extension: flow evaluation + PID callbacks (bidirectional)
             connection.exportedInterface = NSXPCInterface(with: TarnNetworkEvalXPC.self)
             connection.exportedObject = service
-            connection.invalidationHandler = {
+            connection.remoteObjectInterface = NSXPCInterface(with: TarnNECallbackXPC.self)
+            connection.invalidationHandler = { [weak service] in
+                service?.neConnection = nil
                 NSLog("tarn-es: NE extension disconnected")
             }
             connection.resume()
+            service.neConnection = connection
             NSLog("tarn-es: NE extension connected (pid %d)", connection.processIdentifier)
         } else {
             // CLI: session management + bidirectional prompts
@@ -147,6 +169,7 @@ private final class UnifiedListenerDelegate: NSObject, NSXPCListenerDelegate {
                     DecisionEngine.shared.sessionCache.clear()
                     DecisionEngine.shared.processTree.removeAll()
                     DecisionEngine.shared.configure(config: Config.defaults(), repoPath: "")
+                    ESXPCService.shared.notifyNEClearAll()
                     NSLog("tarn-es: CLI disconnected; full session state reset")
                 }
             }
@@ -280,6 +303,8 @@ extension ESXPCService: TarnSupervisorXPC {
             return
         }
         ESClient.shared.registerAgentPID(pid)
+        // Push to NE extension so it only intercepts this PID's flows
+        ESXPCService.shared.notifyNE(addPID: pid)
         reply(nil)
     }
 }

@@ -36,6 +36,9 @@ struct Run: ParsableCommand {
     @Option(name: .long, help: "Path to profile file")
     var profile: String = ""
 
+    @Flag(name: .long, help: "Resume the agent's last session")
+    var resume: Bool = false
+
     func run() throws {
         let expandedRepo = NSString(string: repoPath).expandingTildeInPath
         guard FileManager.default.fileExists(atPath: expandedRepo) else {
@@ -102,7 +105,8 @@ struct Run: ParsableCommand {
         print("  Entries:  \(session.allowCount) allow, \(session.denyCount) deny")
         print("")
 
-        let agentCommand = agentProfile.launchCommand
+        var agentCommand = agentProfile.launchCommand
+        if resume { agentCommand.append("--resume") }
         print("Launching: \(agentCommand.joined(separator: " "))")
         print("")
 

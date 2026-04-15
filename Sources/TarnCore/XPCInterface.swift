@@ -158,12 +158,21 @@ public struct PromptResponseMessage: Codable {
     }
 }
 
-// MARK: - Network evaluation XPC (NE extension → ES extension)
+// MARK: - Network evaluation XPC (NE extension ↔ ES extension)
 
 /// Protocol for the NE extension to forward flow evaluations to the
 /// ES extension, which hosts the DecisionEngine and ProcessTree.
 @objc public protocol TarnNetworkEvalXPC {
     func evaluateFlow(_ requestData: Data, reply: @escaping (Data) -> Void)
+}
+
+/// Callback protocol: ES extension → NE extension.
+/// Pushes supervised PID changes so the NE filter only intercepts
+/// flows from supervised processes (same pattern as ES inverted muting).
+@objc public protocol TarnNECallbackXPC {
+    func addSupervisedPID(_ pid: Int32)
+    func removeSupervisedPID(_ pid: Int32)
+    func clearSupervisedPIDs()
 }
 
 /// Request sent from the NE extension to the ES extension for flow evaluation.

@@ -60,10 +60,6 @@ class NetworkFilter: NEFilterDataProvider {
     }
 
     override func handleNewFlow(_ flow: NEFilterFlow) -> NEFilterNewFlowVerdict {
-        // Fast path: no active session → allow everything instantly.
-        // This ensures tarn NEVER affects non-supervised traffic.
-        guard ESBridgeClient.shared.hasActiveSession else { return .allow() }
-
         guard let socketFlow = flow as? NEFilterSocketFlow else {
             return .allow()
         }
@@ -78,7 +74,9 @@ class NetworkFilter: NEFilterDataProvider {
             return audit_token_to_pid(token)
         }
 
-        // Not supervised → allow immediately, no XPC needed.
+        // Only intercept supervised PIDs. The ES extension pushes
+        // supervised PID updates via TarnNECallbackXPC — same pattern
+        // as ES inverted muting. Non-supervised traffic is never touched.
         guard ESBridgeClient.shared.isSupervised(pid: pid) else {
             return .allow()
         }

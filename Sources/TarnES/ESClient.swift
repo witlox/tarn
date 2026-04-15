@@ -3,17 +3,16 @@ import Foundation
 import TarnCore
 
 /// Manages the Endpoint Security client for file and process
-/// supervision. Subscribes to AUTH_OPEN for file access control and
-/// NOTIFY_FORK/NOTIFY_EXIT for process tree maintenance.
+/// supervision. Uses inverted process muting so AUTH_OPEN only
+/// fires for supervised PIDs — zero overhead for everything else.
 ///
-/// Network supervision is NOT handled here — that is the
-/// NetworkFilter (NEFilterDataProvider). Both share the same
-/// ProcessTree and DecisionEngine.
+/// Process tree tracking (NOTIFY_FORK/EXIT) is always active and
+/// never muted. When a supervised parent forks, the child is
+/// automatically unmuted using its audit token from the fork event.
 final class ESClient {
     static let shared = ESClient()
 
     private var client: OpaquePointer?
-    var isAvailable: Bool { true } // runtime check could go here
 
     private init() {}
 
@@ -36,6 +35,13 @@ final class ESClient {
 
         self.client = newClient
 
+        // Invert process muting: all processes muted by default.
+        // Only explicitly unmuted PIDs trigger AUTH_OPEN callbacks.
+        // NOTIFY events are never affected by muting.
+        es_invert_muting(newClient!, ES_MUTE_INVERSION_TYPE_PROCESS)
+
+        // Subscribe to everything upfront. AUTH_OPEN only fires for
+        // unmuted (supervised) processes. NOTIFY fires for all.
         let events: [es_event_type_t] = [
             ES_EVENT_TYPE_AUTH_OPEN,
             ES_EVENT_TYPE_NOTIFY_FORK,
@@ -55,8 +61,31 @@ final class ESClient {
         }
     }
 
+    /// Register a supervised PID and unmute it for AUTH_OPEN.
+    /// The audit token is obtained via task_info.
     func registerAgentPID(_ pid: pid_t) {
         DecisionEngine.shared.processTree.addRoot(pid: pid)
+        unmuteByPID(pid)
+    }
+
+    /// Unmute a PID so AUTH_OPEN events fire for it.
+    private func unmuteByPID(_ pid: pid_t) {
+        guard let client = client else { return }
+        var token = audit_token_t()
+        var taskPort: mach_port_t = 0
+        guard task_for_pid(mach_task_self_, pid, &taskPort) == KERN_SUCCESS else {
+            return
+        }
+        var info = mach_msg_type_number_t(
+            MemoryLayout<audit_token_t>.size / MemoryLayout<natural_t>.size
+        )
+        withUnsafeMutablePointer(to: &token) { ptr in
+            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(info)) { intPtr in
+                task_info(taskPort, task_flavor_t(TASK_AUDIT_TOKEN), intPtr, &info)
+            }
+        }
+        mach_port_deallocate(mach_task_self_, taskPort)
+        es_unmute_process(client, &token)
     }
 
     // MARK: - Event dispatch
@@ -71,9 +100,6 @@ final class ESClient {
         case ES_EVENT_TYPE_AUTH_OPEN:
             handleAuthOpen(message)
         default:
-            // F20: Only AUTH events require a response. NOTIFY events
-            // must NOT be responded to — calling es_respond_auth_result
-            // on a NOTIFY message is undefined behaviour.
             break
         }
     }
@@ -85,28 +111,33 @@ final class ESClient {
         let tree = DecisionEngine.shared.processTree
         if tree.isSupervised(pid: parentPid) {
             tree.addChild(pid: childPid, parentPID: parentPid)
+            // Unmute the child for ES AUTH_OPEN
+            if let client = client {
+                var childToken = msg.event.fork.child.pointee.audit_token
+                es_unmute_process(client, &childToken)
+            }
+            // Push to NE extension for network flow filtering
+            ESXPCService.shared.notifyNE(addPID: childPid)
         }
     }
 
     private func handleExit(_ message: UnsafePointer<es_message_t>) {
         let pid = audit_token_to_pid(message.pointee.process.pointee.audit_token)
+        let wasSupervised = DecisionEngine.shared.processTree.isSupervised(pid: pid)
         DecisionEngine.shared.processTree.remove(pid: pid)
+        if wasSupervised {
+            ESXPCService.shared.notifyNE(removePID: pid)
+        }
     }
 
     private func handleAuthOpen(_ message: UnsafePointer<es_message_t>) {
         guard let client = client else { return }
-
-        // Fast path: no supervised session → allow everything instantly.
-        let tree = DecisionEngine.shared.processTree
-        guard !tree.isEmpty else {
-            es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
-            return
-        }
-
         let msg = message.pointee
         let pid = audit_token_to_pid(msg.process.pointee.audit_token)
 
-        guard tree.isSupervised(pid: pid) else {
+        // With inverted muting, only unmuted (supervised) PIDs reach here.
+        // Double-check as safety net.
+        guard DecisionEngine.shared.processTree.isSupervised(pid: pid) else {
             es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
             return
         }
@@ -117,17 +148,11 @@ final class ESClient {
         let isWrite = (Int32(flags) & FWRITE) != 0
         let engine = DecisionEngine.shared
 
-        // Deny set is checked FIRST — before trusted regions.
-        // A denied path is denied regardless of where it is.
-        // Patterns are pre-expanded with the user's home (not root's).
-        let currentConfig = engine.config
-        if currentConfig.isDeniedExpanded(path: path) {
+        if engine.config.isDeniedExpanded(path: path) {
             es_respond_auth_result(client, message, ES_AUTH_RESULT_DENY, false)
             return
         }
 
-        // Trusted regions — system paths are read-only; workspace and
-        // /tmp allow reads and writes.
         if engine.isInTrustedRegion(path: path, isWrite: isWrite) {
             es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
             return
@@ -137,11 +162,6 @@ final class ESClient {
         let kind: AccessRequest.Kind = isWrite ? .fileWrite(path: path) : .fileRead(path: path)
         let request = AccessRequest(kind: kind, pid: pid, processPath: processPath)
 
-        // Async decision: retain the message, respond from the callback.
-        // F18: The callback captures `self` (not the local `client`) so
-        // that a stop() between retain and callback doesn't use a stale
-        // pointer. If client is nil the message was already released by
-        // es_delete_client.
         es_retain_message(message)
         engine.asyncDecide(request: request) { [weak self] action in
             guard let currentClient = self?.client else {
