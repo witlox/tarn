@@ -17,16 +17,16 @@ private let esLog = OSLog(subsystem: "com.witlox.tarn.es", category: "es")
 final class ESClient {
     static let shared = ESClient()
 
-    private var client: OpaquePointer?
+    fileprivate var client: OpaquePointer?
 
     /// CLI PIDs we're watching for the next fork (agent spawn).
-    private var watchedCLIPIDs: Set<pid_t> = []
+    fileprivate var watchedCLIPIDs: Set<pid_t> = []
     /// Agent PIDs that were unmuted by handleFork before confirmAgentPID.
-    private var unmutedAgentPIDs: Set<pid_t> = []
-    private let pendingLock = NSLock()
+    fileprivate var unmutedAgentPIDs: Set<pid_t> = []
+    fileprivate let pendingLock = NSLock()
 
     /// AUTH event types we mute for non-supervised processes.
-    private static let mutedAuthEvents: [es_event_type_t] = [
+    static let mutedAuthEvents: [es_event_type_t] = [
         ES_EVENT_TYPE_AUTH_OPEN,
         ES_EVENT_TYPE_AUTH_LINK,
         ES_EVENT_TYPE_AUTH_UNLINK,
@@ -114,9 +114,12 @@ final class ESClient {
         os_log(.error, log: esLog, "tarn-es: cleared pending state (watchedCLIPIDs + unmutedAgentPIDs)")
     }
 
-    // MARK: - Event dispatch
+}
 
-    private func handleEvent(_ message: UnsafePointer<es_message_t>) {
+// MARK: - Event Handlers
+
+extension ESClient {
+    func handleEvent(_ message: UnsafePointer<es_message_t>) {
         let msg = message.pointee
         switch msg.event_type {
         case ES_EVENT_TYPE_NOTIFY_FORK:
@@ -136,7 +139,7 @@ final class ESClient {
         }
     }
 
-    private func handleFork(_ message: UnsafePointer<es_message_t>) {
+    func handleFork(_ message: UnsafePointer<es_message_t>) {
         let msg = message.pointee
         let parentPid = audit_token_to_pid(msg.process.pointee.audit_token)
         let childPid = audit_token_to_pid(msg.event.fork.child.pointee.audit_token)
@@ -181,7 +184,7 @@ final class ESClient {
         }
     }
 
-    private func handleExit(_ message: UnsafePointer<es_message_t>) {
+    func handleExit(_ message: UnsafePointer<es_message_t>) {
         let pid = audit_token_to_pid(message.pointee.process.pointee.audit_token)
         let wasSupervised = DecisionEngine.shared.processTree.isSupervised(pid: pid)
         DecisionEngine.shared.processTree.remove(pid: pid)
@@ -193,7 +196,7 @@ final class ESClient {
         }
     }
 
-    private func handleAuthOpen(_ message: UnsafePointer<es_message_t>) {
+    func handleAuthOpen(_ message: UnsafePointer<es_message_t>) {
         guard let client = client else { return }
         let msg = message.pointee
         let pid = audit_token_to_pid(msg.process.pointee.audit_token)
@@ -255,7 +258,7 @@ final class ESClient {
     /// in the deny set, DENY. This prevents bypassing the deny set via
     /// hardlinks (the hardlink target would be in the workspace trusted
     /// region, evading deny-set checks on subsequent opens).
-    private func handleLink(_ message: UnsafePointer<es_message_t>) {
+    func handleLink(_ message: UnsafePointer<es_message_t>) {
         guard let client = client else { return }
         let msg = message.pointee
         let pid = audit_token_to_pid(msg.process.pointee.audit_token)
@@ -285,7 +288,7 @@ final class ESClient {
     }
 
     /// F-13: Handle AUTH_UNLINK — deny deletion of deny-set files.
-    private func handleUnlink(_ message: UnsafePointer<es_message_t>) {
+    func handleUnlink(_ message: UnsafePointer<es_message_t>) {
         guard let client = client else { return }
         let msg = message.pointee
         let pid = audit_token_to_pid(msg.process.pointee.audit_token)
@@ -313,7 +316,7 @@ final class ESClient {
     }
 
     /// F-13: Handle AUTH_RENAME — deny rename from/to deny-set paths.
-    private func handleRename(_ message: UnsafePointer<es_message_t>) {
+    func handleRename(_ message: UnsafePointer<es_message_t>) {
         guard let client = client else { return }
         let msg = message.pointee
         let pid = audit_token_to_pid(msg.process.pointee.audit_token)
