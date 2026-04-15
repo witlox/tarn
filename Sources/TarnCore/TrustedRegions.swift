@@ -6,8 +6,14 @@ public struct TrustedRegions {
     /// System paths that are always allowed for reads.
     public static let systemPrefixes = [
         "/usr", "/lib", "/bin", "/sbin", "/System", "/Library",
-        "/Applications", "/private/var/db", "/dev",
+        "/Applications", "/private/var/db", "/dev", "/opt",
+        "/private/etc",
     ]
+
+    /// Exact paths allowed for reads. "/" is a directory listing
+    /// opened by Node.js and other runtimes during module resolution.
+    /// It reveals no file contents — just top-level directory names.
+    public static let systemExactReadPaths: [String] = ["/"]
 
     /// Check if a path is in a trusted region.
     /// Workspace and /tmp allow reads and writes.

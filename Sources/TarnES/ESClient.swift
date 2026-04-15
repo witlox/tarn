@@ -60,21 +60,11 @@ final class ESClient {
 
         self.client = newClient
 
-        // No inverted muting — we need NOTIFY_FORK from all processes.
-        // Instead, we mute AUTH events per-process for non-supervised PIDs
-        // as we discover them via NOTIFY_FORK.
-        let events: [es_event_type_t] = [
-            ES_EVENT_TYPE_AUTH_OPEN,
-            ES_EVENT_TYPE_AUTH_LINK,    // F-07: hardlink bypass prevention
-            ES_EVENT_TYPE_AUTH_UNLINK,  // F-13: file deletion supervision
-            ES_EVENT_TYPE_AUTH_RENAME,  // F-13: file rename supervision
-            ES_EVENT_TYPE_NOTIFY_FORK,
-            ES_EVENT_TYPE_NOTIFY_EXIT,
-        ]
-        let subResult = es_subscribe(newClient!, events, UInt32(events.count))
-        guard subResult == ES_RETURN_SUCCESS else {
-            throw MonitorError.subscriptionFailed
-        }
+        // Don't subscribe to any events at startup — zero overhead.
+        // Events are subscribed when a session starts (enableSubscriptions)
+        // and unsubscribed when the session ends (disableSubscriptions).
+        // This ensures the ES client has zero impact on system performance
+        // when no tarn session is active.
     }
 
     func stop() {
@@ -85,8 +75,67 @@ final class ESClient {
         }
     }
 
+    /// Subscribe to all ES events. Called when a session starts.
+    /// Mutes noisy target paths first to prevent the startup burst
+    /// of AUTH callbacks that previously caused the kernel to SIGKILL
+    /// us for not responding in time.
+    func enableSubscriptions() {
+        guard let client = client else { return }
+
+        // Step 1: Mute noisy TARGET paths before subscribing.
+        // These paths generate 99% of AUTH_OPEN events and are
+        // always allowed (system libraries, frameworks, caches).
+        // Supervised processes reading these paths are also allowed
+        // (they're in TrustedRegions), so muting them loses nothing.
+        let mutedTargetPrefixes = [
+            "/System",
+            "/Library",
+            "/usr/lib",
+            "/usr/bin",
+            "/usr/sbin",
+            "/usr/share",
+            "/usr/libexec",
+            "/bin",
+            "/sbin",
+            "/dev",
+            "/private/var/db",
+            "/private/var/folders",
+            "/private/var/run",
+            "/private/etc",
+            "/Applications",
+            "/opt",
+        ]
+        for prefix in mutedTargetPrefixes {
+            es_mute_path(client, prefix, ES_MUTE_PATH_TYPE_TARGET_PREFIX)
+        }
+
+        // Step 2: Subscribe to all events. NOTIFY events are never
+        // affected by path muting. AUTH events only fire for target
+        // paths NOT in the muted set — mainly user home directories
+        // and the workspace.
+        let events: [es_event_type_t] = [
+            ES_EVENT_TYPE_AUTH_OPEN,
+            ES_EVENT_TYPE_AUTH_LINK,
+            ES_EVENT_TYPE_AUTH_UNLINK,
+            ES_EVENT_TYPE_AUTH_RENAME,
+            ES_EVENT_TYPE_NOTIFY_FORK,
+            ES_EVENT_TYPE_NOTIFY_EXIT,
+        ]
+        es_subscribe(client, events, UInt32(events.count))
+
+        os_log(.error, log: esLog, "tarn-es: subscribed to ES events (muted %d target path prefixes)", mutedTargetPrefixes.count)
+    }
+
+    /// Unsubscribe from all ES events. Called when session ends.
+    func disableSubscriptions() {
+        guard let client = client else { return }
+        es_unsubscribe_all(client)
+        os_log(.error, log: esLog, "tarn-es: unsubscribed from ES events")
+    }
+
     /// Step 1: Called BEFORE posix_spawn. Watch for next fork from cliPID.
     func watchForAgentFork(cliPID: pid_t) {
+        enableSubscriptions()
         pendingLock.lock()
         watchedCLIPIDs.insert(cliPID)
         pendingLock.unlock()
@@ -107,6 +156,7 @@ final class ESClient {
 
     /// F-11: Clear pending state on session end or CLI disconnect.
     func clearPendingState() {
+        disableSubscriptions()
         pendingLock.lock()
         watchedCLIPIDs.removeAll()
         unmutedAgentPIDs.removeAll()

@@ -146,8 +146,27 @@ struct Run: ParsableCommand {
 /// entire tree (agent + child processes) during tarn prompts.
 /// We then use tcsetpgrp() to make it the foreground group
 /// so it can do interactive TTY I/O.
+/// Resolve a command name to its full path by searching PATH.
+func resolveCommand(_ name: String) -> String? {
+    guard let pathEnv = ProcessInfo.processInfo.environment["PATH"] else { return nil }
+    for dir in pathEnv.split(separator: ":") {
+        let full = "\(dir)/\(name)"
+        if FileManager.default.isExecutableFile(atPath: full) {
+            return full
+        }
+    }
+    return nil
+}
+
 func spawnAgent(command: [String], workingDirectory: String) throws -> pid_t {
-    let fullCommand = ["/usr/bin/env"] + command
+    // Resolve the binary path ourselves instead of using /usr/bin/env.
+    // env opens "/" to traverse PATH, which triggers an ES AUTH_OPEN
+    // for the root directory under the supervised PID.
+    guard let binaryPath = resolveCommand(command[0]) else {
+        print("tarn: command not found: \(command[0])")
+        throw ExitCode.failure
+    }
+    let fullCommand = [binaryPath] + Array(command.dropFirst())
     let argv: [UnsafeMutablePointer<CChar>?] = fullCommand.map { strdup($0) } + [nil]
     defer { argv.forEach { if let ptr = $0 { free(ptr) } } }
 
@@ -172,7 +191,7 @@ func spawnAgent(command: [String], workingDirectory: String) throws -> pid_t {
     defer { posix_spawnattr_destroy(&attrs) }
 
     var pid: pid_t = 0
-    let result = posix_spawnp(&pid, argv[0], &fileActions, &attrs, argv, envp)
+    let result = posix_spawn(&pid, binaryPath, &fileActions, &attrs, argv, envp)
     guard result == 0 else {
         print("tarn: failed to launch agent (errno \(result))")
         throw ExitCode.failure
