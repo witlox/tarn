@@ -7,6 +7,19 @@ Darwin.write(2, "tarn: app starting\n", 19)
 // MARK: - Emergency kill switch
 
 if CommandLine.arguments.contains("--kill") {
+    // F-22/I-03: Require interactive TTY + user confirmation.
+    // No --force flag — an agent could use it to bypass confirmation.
+    guard isatty(STDIN_FILENO) != 0 else {
+        fputs("tarn: --kill requires an interactive terminal.\n", stderr)
+        exit(1)
+    }
+    fputs("WARNING: This will disable the Tarn network filter.\n", stderr)
+    fputs("All network supervision will stop immediately.\n", stderr)
+    fputs("Type 'yes' to confirm: ", stderr)
+    guard let input = readLine(), input.lowercased() == "yes" else {
+        fputs("tarn: kill switch aborted.\n", stderr)
+        exit(1)
+    }
     fputs("tarn: EMERGENCY KILL — removing NE filter config...\n", stderr)
     let sem = DispatchSemaphore(value: 0)
     NEFilterManager.shared().loadFromPreferences { _ in

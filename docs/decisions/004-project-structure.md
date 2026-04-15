@@ -5,22 +5,23 @@ Status: Accepted
 
 ## Context
 
-ADR-001 establishes that tarn is a `.app` bundle containing a CLI and a system extension. ADR-002 establishes that the system extension hosts both the Endpoint Security client and a `NEFilterDataProvider`. Neither of those decisions specifies how the project is laid out on disk or which build system produces the deliverable. This document does.
+ADR-001 establishes that tarn is a `.app` bundle containing a CLI and system extensions. ADR-005 establishes that ES and NE run in separate system extensions (TarnES and TarnSupervisor). Neither of those decisions specifies how the project is laid out on disk or which build system produces the deliverable. This document does.
 
 The constraint that drives everything: **Swift Package Manager cannot build `.systemextension` bundles or `.app` bundles.** SPM produces libraries and bare executables. Apple's system-extension and app-bundle targets are Xcode-only build product types. Any project that ships a system extension on macOS uses Xcode for at least the bundle targets. LuLu, Little Snitch, Apple's `SimpleFirewall` sample, and `agentsh` all use Xcode projects.
 
 ## Decision
 
-**Use an Xcode project with three targets, one shared Swift library, and a small layer of XPC code on top.**
+**Use an Xcode project with four targets, one shared Swift library, and XPC code connecting them.**
 
 ### Targets
 
 | Target | Type | Output | Role |
 |---|---|---|---|
-| **TarnCore** | Static library (Swift) | `libTarnCore.a` | Pure policy: Profile composition, ProcessTree, SessionCache, Config (TOML), errors, lock file, ubiquitous types. No system framework dependencies beyond Foundation. Linked by both other targets. |
-| **tarn** | Command Line Tool (Swift) | `tarn` executable, embedded at `Tarn.app/Contents/MacOS/tarn` | The unprivileged CLI. Argument parsing (ArgumentParser), agent process launch, terminal prompt UI, XPC client to the supervisor. Symlinked to `/usr/local/bin/tarn` so users invoke it as a normal command. |
-| **TarnSupervisor** | System Extension (Swift) | `com.witlox.tarn.supervisor.systemextension`, embedded at `Tarn.app/Contents/Library/SystemExtensions/` | The privileged supervisor. Hosts the ES client (file/process events), the `NEFilterDataProvider` (network flows), the supervised process tree, and the XPC service that the CLI talks to. |
-| **Tarn** | macOS app (Swift, `LSUIElement=YES`) | `Tarn.app` | The host bundle. No UI; its only job is to embed the CLI binary and the system extension and provide the activation entry point that calls `OSSystemExtensionRequest`. The CLI invokes activation lazily on first run if the extension is not already installed. |
+| **TarnCore** | Static library (Swift) | `libTarnCore.a` | Pure policy: Profile composition, ProcessTree, SessionCache, Config (TOML), DecisionEngine, errors, lock file, ubiquitous types. No system framework dependencies beyond Foundation. Linked by all other targets. |
+| **tarn** | Command Line Tool (Swift) | `tarn` executable, embedded at `Tarn.app/Contents/MacOS/tarn` | The unprivileged CLI. Argument parsing (ArgumentParser), agent process launch (suspended spawn per ADR-006), terminal prompt UI, XPC client to TarnES. Symlinked to `/usr/local/bin/tarn` so users invoke it as a normal command. |
+| **TarnES** | System Extension (Swift) | `com.witlox.tarn.es.systemextension`, embedded at `Tarn.app/Contents/Library/SystemExtensions/` | The Endpoint Security extension. Hosts ESClient (AUTH_OPEN, AUTH_LINK, AUTH_UNLINK, AUTH_RENAME, NOTIFY_FORK, NOTIFY_EXIT with per-event muting per ADR-006), ESXPCService, DecisionEngine, ProcessTree, and SessionCache. Accepts XPC connections from both the CLI and TarnSupervisor. See [ADR-005](005-two-extension-split.md). |
+| **TarnSupervisor** | System Extension (Swift) | `com.witlox.tarn.supervisor.systemextension`, embedded at `Tarn.app/Contents/Library/SystemExtensions/` | The Network Extension extension. Hosts `NEFilterDataProvider` (NetworkFilter) and ESBridgeClient. Stateless thin proxy: intercepts outbound flows, forwards to TarnES via XPC for evaluation, resumes with the verdict. See [ADR-005](005-two-extension-split.md). |
+| **Tarn** | macOS app (Swift, `LSUIElement=YES`) | `Tarn.app` | The host bundle. No UI; its only job is to embed the CLI binary and both system extensions, and provide the activation entry point. Activates TarnES first, then TarnSupervisor (via `NEFilterManager.saveToPreferences`). |
 
 ### Directory layout
 
@@ -46,17 +47,21 @@ tarn/
 │   │   ├── Commands/
 │   │   ├── PromptUI.swift
 │   │   └── XPCClient.swift
-│   ├── TarnSupervisor/         ← the system extension
+│   ├── TarnES/                 ← the ES system extension (ADR-005)
 │   │   ├── main.swift
-│   │   ├── ESClient.swift
+│   │   ├── ESClient.swift       ← AUTH_OPEN/LINK/UNLINK/RENAME, per-event muting
+│   │   └── ESXPCService.swift   ← serves CLI + TarnSupervisor
+│   ├── TarnSupervisor/         ← the NE system extension (ADR-005)
+│   │   ├── main.swift
 │   │   ├── NetworkFilter.swift  ← NEFilterDataProvider subclass
-│   │   ├── XPCService.swift
-│   │   └── DecisionEngine.swift
+│   │   └── ESBridgeClient.swift ← XPC client to TarnES
 │   └── TarnApp/                ← the host app bundle
 │       ├── main.swift
 │       └── ExtensionActivator.swift
 ├── Resources/
 │   ├── TarnCLI-Info.plist
+│   ├── TarnES-Info.plist
+│   ├── TarnES.entitlements
 │   ├── TarnSupervisor-Info.plist
 │   ├── TarnApp-Info.plist
 │   ├── TarnCLI.entitlements
@@ -72,7 +77,7 @@ tarn/
 
 ### Why both Xcode and SPM
 
-`Tarn.xcodeproj` is the source of truth for builds — it produces `Tarn.app` with the CLI and system extension embedded correctly. `Package.swift` is kept solely so that `TarnCore` can be unit-tested via `swift test` without launching Xcode. The TarnCore library has no system framework dependencies beyond Foundation, so it builds and tests cleanly under SPM. The Xcode targets `tarn`, `TarnSupervisor`, and `Tarn` reference the same source files but are built with their respective bundle product types.
+`Tarn.xcodeproj` is the source of truth for builds — it produces `Tarn.app` with the CLI and both system extensions embedded correctly. `Package.swift` is kept solely so that `TarnCore` can be unit-tested via `swift test` without launching Xcode. The TarnCore library has no system framework dependencies beyond Foundation, so it builds and tests cleanly under SPM. The Xcode targets `tarn`, `TarnES`, `TarnSupervisor`, and `Tarn` reference the same source files but are built with their respective bundle product types.
 
 This dual-build is a small maintenance cost (file lists in two places, kept in sync by `git diff`) but a meaningful productivity gain: most of the value of TarnCore is in fast iterative testing of the policy logic, and dropping into Xcode for every change to a profile rule would be a drag.
 
@@ -82,12 +87,25 @@ This dual-build is a small maintenance cost (file lists in two places, kept in s
 
 ```xml
 <key>com.apple.developer.system-extension.install</key><true/>
+<key>com.apple.developer.networking.networkextension</key>
+<array>
+    <string>content-filter-provider-systemextension</string>
+</array>
+```
+
+**TarnES** (`TarnES.entitlements`):
+
+```xml
+<key>com.apple.developer.endpoint-security.client</key><true/>
+<key>com.apple.security.application-groups</key>
+<array>
+    <string>$(TeamIdentifierPrefix)com.witlox.tarn</string>
+</array>
 ```
 
 **TarnSupervisor** (`TarnSupervisor.entitlements`):
 
 ```xml
-<key>com.apple.developer.endpoint-security.client</key><true/>
 <key>com.apple.developer.networking.networkextension</key>
 <array>
     <string>content-filter-provider-systemextension</string>
@@ -100,26 +118,21 @@ This dual-build is a small maintenance cost (file lists in two places, kept in s
 
 The CLI binary itself does not need any special entitlements — it is an unprivileged Mach-O that talks XPC.
 
+Note: The ES entitlement is on TarnES only; the NE entitlement is on TarnSupervisor and Tarn.app (the host app needs it for `NEFilterManager` activation). Application groups are shared so both extensions can communicate via the same Mach service namespace.
+
 ### XPC interface
 
-The CLI and the supervisor communicate via XPC, the macOS-native interprocess RPC mechanism. The interface is defined as a Swift protocol in `TarnCore/XPCInterface.swift` and conformed to on the supervisor side. Method signatures (sketch, will be refined in implementation):
+Three XPC relationships exist in the two-extension architecture ([ADR-005](005-two-extension-split.md)):
 
-```swift
-@objc public protocol TarnSupervisorXPC {
-    func startSession(repoPath: String,
-                       agent: String,
-                       stacks: [String],
-                       reply: @escaping (UUID?, Error?) -> Void)
-    func endSession(_ id: UUID, reply: @escaping () -> Void)
-    func registerAgentRoot(session: UUID, pid: pid_t, reply: @escaping () -> Void)
+1. **CLI → TarnES** (`kTarnESMachServiceName`): session management, agent PID registration (suspended spawn per ADR-006), prompt responses.
+2. **TarnES → CLI** (reverse XPC callback): prompt requests pushed from TarnES to the CLI's prompt handler.
+3. **TarnSupervisor → TarnES** (`kTarnESMachServiceName`): network flow forwarding. TarnSupervisor's ESBridgeClient connects to TarnES's ESXPCService. TarnES also pushes supervised PID updates to TarnSupervisor.
 
-    // Push: supervisor → CLI for interactive prompts
-    func handlePromptRequest(_ request: PromptRequestData,
-                              reply: @escaping (PromptResponseData) -> Void)
-}
-```
+Both the CLI and TarnSupervisor connect to the same Mach service on TarnES. The ESXPCService distinguishes them by effective UID (root vs. user).
 
-Prompts flow from supervisor to CLI (the supervisor pauses the flow or holds the file open, sends an XPC request to the CLI's prompt handler, waits for the response, then resumes/responds). The CLI also calls into the supervisor to start and end sessions.
+The interfaces are defined as Swift protocols in `TarnCore/XPCInterface.swift` and conformed to in `TarnES/ESXPCService.swift`.
+
+Prompts flow from TarnES to CLI (TarnES pauses the ES response or holds the NE flow, sends an XPC request to the CLI's prompt handler, waits for the response, then resumes/responds). For network flows, the chain is: TarnSupervisor pauses the flow → forwards to TarnES → TarnES prompts the CLI → CLI responds → TarnES returns verdict → TarnSupervisor resumes the flow.
 
 ### Build commands
 
@@ -156,4 +169,5 @@ Investigated. Tuist (and similar tools like XcodeGen) generate `.xcodeproj` file
 - Building requires `xcodebuild` for the `.app`; tests can still run via `swift test` for fast iteration on policy code.
 - The CI pipeline (when added) needs `xcodebuild`, `notarytool`, and the Developer ID certificates configured as secrets.
 - Distribution is a notarized `.dmg` or `.pkg` containing `Tarn.app`, with a post-install step that creates `/usr/local/bin/tarn` as a symlink into the bundle.
-- Uninstall is the reverse: deactivate the system extension via `systemextensionsctl uninstall`, delete `Tarn.app`, remove the symlink, optionally remove `~/Library/Application Support/tarn/`.
+- Uninstall is the reverse: deactivate both system extensions via `systemextensionsctl uninstall`, delete `Tarn.app`, remove the symlink, optionally remove `~/Library/Application Support/tarn/`.
+- Two system extension targets (TarnES, TarnSupervisor) means two Info.plists, two entitlements files, and a more complex `project.yml`. The trade-off is documented in [ADR-005](005-two-extension-split.md).

@@ -74,10 +74,10 @@ class NetworkFilter: NEFilterDataProvider {
             return audit_token_to_pid(token)
         }
 
-        // Only intercept supervised PIDs. The ES extension pushes
-        // supervised PID updates via TarnNECallbackXPC — same pattern
-        // as ES inverted muting. Non-supervised traffic is never touched.
-        guard ESBridgeClient.shared.isSupervised(pid: pid) else {
+        // F-02: Check supervision using full audit token data (PID-reuse-safe).
+        // Falls back to PID check for fast path, but token comparison is
+        // authoritative and prevents PID reuse collisions.
+        guard ESBridgeClient.shared.isSupervised(tokenData: tokenData) else {
             return .allow()
         }
 
@@ -95,8 +95,8 @@ class NetworkFilter: NEFilterDataProvider {
 
         let isUDP = socketFlow.socketType == SOCK_DGRAM
 
-        // Build request for the ES extension
-        let request = NetworkFlowRequest(pid: pid, hostname: hostname, isUDP: isUDP)
+        // Build request for the ES extension (F-02: include audit token)
+        let request = NetworkFlowRequest(pid: pid, hostname: hostname, isUDP: isUDP, tokenData: tokenData)
 
         // Pause the flow and forward to ES extension via XPC
         let flowId = UUID().uuidString
@@ -110,9 +110,10 @@ class NetworkFilter: NEFilterDataProvider {
         pausedFlows[flowId] = flow
         pausedFlowOrder.append(flowId)
         flowLock.unlock()
-        // Resume evicted flow OUTSIDE the lock to avoid deadlock
+        // F-15: Resume evicted flow with ALLOW (fail-open), not drop.
+        // Under flow-flooding, we prefer allowing traffic over blocking it.
         if let evicted = evictedFlow {
-            resumeFlow(evicted, with: NEFilterNewFlowVerdict.drop())
+            resumeFlow(evicted, with: NEFilterNewFlowVerdict.allow())
         }
 
         // Forward to ES extension for decision
@@ -142,7 +143,7 @@ class NetworkFilter: NEFilterDataProvider {
                 self.pausedFlowOrder.removeAll(where: { $0 == flowId })
                 self.flowLock.unlock()
                 self.resumeFlow(udpFlow, with: NEFilterNewFlowVerdict.drop())
-                NSLog("tarn-ne: auto-denied UDP flow to \(hostname) due to 10s deadline")
+                NSLog("tarn-ne: auto-denied UDP flow to \(hostname) due to 8s watchdog")
             }
         }
 

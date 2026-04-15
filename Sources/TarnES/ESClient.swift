@@ -1,18 +1,37 @@
 import EndpointSecurity
 import Foundation
+import os.log
 import TarnCore
 
+private let esLog = OSLog(subsystem: "com.witlox.tarn.es", category: "es")
+
 /// Manages the Endpoint Security client for file and process
-/// supervision. Uses inverted process muting so AUTH_OPEN only
-/// fires for supervised PIDs — zero overhead for everything else.
+/// supervision. NOTIFY_FORK/EXIT fire for all processes (tree tracking).
+/// AUTH_OPEN/AUTH_LINK/AUTH_UNLINK/AUTH_RENAME fire for all processes but
+/// non-supervised ones are muted per-process via es_mute_process_events
+/// on first sight.
 ///
-/// Process tree tracking (NOTIFY_FORK/EXIT) is always active and
-/// never muted. When a supervised parent forks, the child is
-/// automatically unmuted using its audit token from the fork event.
+/// Supervised processes (agent + children) are never muted for AUTH events.
+/// This gives us kernel-level filtering with zero overhead for the vast
+/// majority of processes (they get muted on their first fork event).
 final class ESClient {
     static let shared = ESClient()
 
     private var client: OpaquePointer?
+
+    /// CLI PIDs we're watching for the next fork (agent spawn).
+    private var watchedCLIPIDs: Set<pid_t> = []
+    /// Agent PIDs that were unmuted by handleFork before confirmAgentPID.
+    private var unmutedAgentPIDs: Set<pid_t> = []
+    private let pendingLock = NSLock()
+
+    /// AUTH event types we mute for non-supervised processes.
+    private static let mutedAuthEvents: [es_event_type_t] = [
+        ES_EVENT_TYPE_AUTH_OPEN,
+        ES_EVENT_TYPE_AUTH_LINK,
+        ES_EVENT_TYPE_AUTH_UNLINK,
+        ES_EVENT_TYPE_AUTH_RENAME,
+    ]
 
     private init() {}
 
@@ -21,7 +40,13 @@ final class ESClient {
 
         let result = es_new_client(&newClient) { [weak self] _, message in
             guard let self = self else {
-                if message.pointee.event_type == ES_EVENT_TYPE_AUTH_OPEN, let client = newClient {
+                // Self deallocated — respond to AUTH events to avoid kernel deadline.
+                let eventType = message.pointee.event_type
+                if eventType == ES_EVENT_TYPE_AUTH_OPEN ||
+                   eventType == ES_EVENT_TYPE_AUTH_LINK ||
+                   eventType == ES_EVENT_TYPE_AUTH_UNLINK ||
+                   eventType == ES_EVENT_TYPE_AUTH_RENAME,
+                   let client = newClient {
                     es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
                 }
                 return
@@ -35,15 +60,14 @@ final class ESClient {
 
         self.client = newClient
 
-        // Invert process muting: all processes muted by default.
-        // Only explicitly unmuted PIDs trigger AUTH_OPEN callbacks.
-        // NOTIFY events are never affected by muting.
-        es_invert_muting(newClient!, ES_MUTE_INVERSION_TYPE_PROCESS)
-
-        // Subscribe to everything upfront. AUTH_OPEN only fires for
-        // unmuted (supervised) processes. NOTIFY fires for all.
+        // No inverted muting — we need NOTIFY_FORK from all processes.
+        // Instead, we mute AUTH events per-process for non-supervised PIDs
+        // as we discover them via NOTIFY_FORK.
         let events: [es_event_type_t] = [
             ES_EVENT_TYPE_AUTH_OPEN,
+            ES_EVENT_TYPE_AUTH_LINK,    // F-07: hardlink bypass prevention
+            ES_EVENT_TYPE_AUTH_UNLINK,  // F-13: file deletion supervision
+            ES_EVENT_TYPE_AUTH_RENAME,  // F-13: file rename supervision
             ES_EVENT_TYPE_NOTIFY_FORK,
             ES_EVENT_TYPE_NOTIFY_EXIT,
         ]
@@ -61,31 +85,33 @@ final class ESClient {
         }
     }
 
-    /// Register a supervised PID and unmute it for AUTH_OPEN.
-    /// The audit token is obtained via task_info.
-    func registerAgentPID(_ pid: pid_t) {
-        DecisionEngine.shared.processTree.addRoot(pid: pid)
-        unmuteByPID(pid)
+    /// Step 1: Called BEFORE posix_spawn. Watch for next fork from cliPID.
+    func watchForAgentFork(cliPID: pid_t) {
+        pendingLock.lock()
+        watchedCLIPIDs.insert(cliPID)
+        pendingLock.unlock()
+        os_log(.error, log: esLog, "tarn-es: watching for fork from CLI PID %d", cliPID)
     }
 
-    /// Unmute a PID so AUTH_OPEN events fire for it.
-    private func unmuteByPID(_ pid: pid_t) {
-        guard let client = client else { return }
-        var token = audit_token_t()
-        var taskPort: mach_port_t = 0
-        guard task_for_pid(mach_task_self_, pid, &taskPort) == KERN_SUCCESS else {
-            return
+    /// Step 2: Called AFTER posix_spawn. Confirms PID in tree.
+    func confirmAgentPID(_ pid: pid_t) {
+        let tree = DecisionEngine.shared.processTree
+        if !tree.isSupervised(pid: pid) {
+            tree.addRoot(pid: pid)
         }
-        var info = mach_msg_type_number_t(
-            MemoryLayout<audit_token_t>.size / MemoryLayout<natural_t>.size
-        )
-        withUnsafeMutablePointer(to: &token) { ptr in
-            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(info)) { intPtr in
-                task_info(taskPort, task_flavor_t(TASK_AUDIT_TOKEN), intPtr, &info)
-            }
-        }
-        mach_port_deallocate(mach_task_self_, taskPort)
-        es_unmute_process(client, &token)
+        pendingLock.lock()
+        let wasUnmuted = unmutedAgentPIDs.remove(pid) != nil
+        pendingLock.unlock()
+        os_log(.error, log: esLog, "tarn-es: confirmed agent PID %d, unmuted=%{public}@", pid, wasUnmuted ? "yes" : "no")
+    }
+
+    /// F-11: Clear pending state on session end or CLI disconnect.
+    func clearPendingState() {
+        pendingLock.lock()
+        watchedCLIPIDs.removeAll()
+        unmutedAgentPIDs.removeAll()
+        pendingLock.unlock()
+        os_log(.error, log: esLog, "tarn-es: cleared pending state (watchedCLIPIDs + unmutedAgentPIDs)")
     }
 
     // MARK: - Event dispatch
@@ -99,6 +125,12 @@ final class ESClient {
             handleExit(message)
         case ES_EVENT_TYPE_AUTH_OPEN:
             handleAuthOpen(message)
+        case ES_EVENT_TYPE_AUTH_LINK:
+            handleLink(message)
+        case ES_EVENT_TYPE_AUTH_UNLINK:
+            handleUnlink(message)
+        case ES_EVENT_TYPE_AUTH_RENAME:
+            handleRename(message)
         default:
             break
         }
@@ -109,15 +141,43 @@ final class ESClient {
         let parentPid = audit_token_to_pid(msg.process.pointee.audit_token)
         let childPid = audit_token_to_pid(msg.event.fork.child.pointee.audit_token)
         let tree = DecisionEngine.shared.processTree
+
+        // Check if this fork is from a watched CLI PID (agent spawn)
+        pendingLock.lock()
+        let isWatchedCLI = watchedCLIPIDs.remove(parentPid) != nil
+        if isWatchedCLI {
+            unmutedAgentPIDs.insert(childPid)
+        }
+        pendingLock.unlock()
+
+        if isWatchedCLI {
+            // CLI spawned the agent — add to tree, push to NE.
+            // Do NOT mute AUTH events for this PID.
+            tree.addRoot(pid: childPid)
+            // F-02: Push audit token data to NE extension instead of bare PID.
+            var childToken = msg.event.fork.child.pointee.audit_token
+            let tokenData = Data(bytes: &childToken, count: MemoryLayout<audit_token_t>.size)
+            ESXPCService.shared.notifyNE(addToken: tokenData)
+            os_log(.error, log: esLog, "tarn-es: agent root PID %d from CLI %d", childPid, parentPid)
+            return
+        }
+
+        // Supervised parent forked a child — track and don't mute
         if tree.isSupervised(pid: parentPid) {
             tree.addChild(pid: childPid, parentPID: parentPid)
-            // Unmute the child for ES AUTH_OPEN
-            if let client = client {
-                var childToken = msg.event.fork.child.pointee.audit_token
-                es_unmute_process(client, &childToken)
-            }
-            // Push to NE extension for network flow filtering
-            ESXPCService.shared.notifyNE(addPID: childPid)
+            // F-02: Push audit token data to NE extension.
+            var childToken = msg.event.fork.child.pointee.audit_token
+            let tokenData = Data(bytes: &childToken, count: MemoryLayout<audit_token_t>.size)
+            ESXPCService.shared.notifyNE(addToken: tokenData)
+            return
+        }
+
+        // Non-supervised process: mute all AUTH events for this child
+        // so the callbacks never fire for it. NOTIFY events stay unmuted.
+        if let client = client {
+            var childToken = msg.event.fork.child.pointee.audit_token
+            var authEvents = ESClient.mutedAuthEvents
+            es_mute_process_events(client, &childToken, &authEvents, authEvents.count)
         }
     }
 
@@ -126,7 +186,10 @@ final class ESClient {
         let wasSupervised = DecisionEngine.shared.processTree.isSupervised(pid: pid)
         DecisionEngine.shared.processTree.remove(pid: pid)
         if wasSupervised {
-            ESXPCService.shared.notifyNE(removePID: pid)
+            // F-02: Push audit token data removal to NE extension.
+            var token = message.pointee.process.pointee.audit_token
+            let tokenData = Data(bytes: &token, count: MemoryLayout<audit_token_t>.size)
+            ESXPCService.shared.notifyNE(removeToken: tokenData)
         }
     }
 
@@ -135,11 +198,24 @@ final class ESClient {
         let msg = message.pointee
         let pid = audit_token_to_pid(msg.process.pointee.audit_token)
 
-        // With inverted muting, only unmuted (supervised) PIDs reach here.
-        // Double-check as safety net.
-        guard DecisionEngine.shared.processTree.isSupervised(pid: pid) else {
-            es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
-            return
+        // Non-supervised PID that hasn't been muted yet (e.g. process
+        // that existed before the ES client started). Allow and mute
+        // for future events.
+        // G2-01/G2-02: Check unmutedAgentPIDs before muting — the agent
+        // PID may arrive here before handleFork/confirmAgentPID adds it
+        // to the tree. Muting it would permanently lose supervision.
+        if !DecisionEngine.shared.processTree.isSupervised(pid: pid) {
+            pendingLock.lock()
+            let isPendingAgent = unmutedAgentPIDs.contains(pid)
+            pendingLock.unlock()
+            if !isPendingAgent {
+                es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
+                var token = msg.process.pointee.audit_token
+                var authEvents = ESClient.mutedAuthEvents
+                es_mute_process_events(client, &token, &authEvents, authEvents.count)
+                return
+            }
+            // isPendingAgent: treat as supervised, fall through to decision pipeline.
         }
 
         let event = msg.event.open
@@ -172,6 +248,117 @@ final class ESClient {
             es_respond_auth_result(currentClient, message, result, false)
             es_release_message(message)
         }
+    }
+
+    /// F-07: Handle AUTH_LINK — deny hardlink creation from deny-set paths.
+    /// If a supervised PID creates a hardlink where the SOURCE path is
+    /// in the deny set, DENY. This prevents bypassing the deny set via
+    /// hardlinks (the hardlink target would be in the workspace trusted
+    /// region, evading deny-set checks on subsequent opens).
+    private func handleLink(_ message: UnsafePointer<es_message_t>) {
+        guard let client = client else { return }
+        let msg = message.pointee
+        let pid = audit_token_to_pid(msg.process.pointee.audit_token)
+
+        // Non-supervised: allow (same as handleAuthOpen fast path)
+        if !DecisionEngine.shared.processTree.isSupervised(pid: pid) {
+            pendingLock.lock()
+            let isPendingAgent = unmutedAgentPIDs.contains(pid)
+            pendingLock.unlock()
+            if !isPendingAgent {
+                es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
+                return
+            }
+            // Pending agent — fall through to deny-set check
+        }
+
+        let sourcePath = String(cString: msg.event.link.source.pointee.path.data)
+        let engine = DecisionEngine.shared
+
+        if engine.config.isDeniedExpanded(path: sourcePath) {
+            os_log(.error, log: esLog, "tarn-es: denied hardlink from deny-set path: %{public}@", sourcePath)
+            es_respond_auth_result(client, message, ES_AUTH_RESULT_DENY, false)
+            return
+        }
+
+        es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
+    }
+
+    /// F-13: Handle AUTH_UNLINK — deny deletion of deny-set files.
+    private func handleUnlink(_ message: UnsafePointer<es_message_t>) {
+        guard let client = client else { return }
+        let msg = message.pointee
+        let pid = audit_token_to_pid(msg.process.pointee.audit_token)
+
+        if !DecisionEngine.shared.processTree.isSupervised(pid: pid) {
+            pendingLock.lock()
+            let isPendingAgent = unmutedAgentPIDs.contains(pid)
+            pendingLock.unlock()
+            if !isPendingAgent {
+                es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
+                return
+            }
+        }
+
+        let targetPath = String(cString: msg.event.unlink.target.pointee.path.data)
+        let engine = DecisionEngine.shared
+
+        if engine.config.isDeniedExpanded(path: targetPath) {
+            os_log(.error, log: esLog, "tarn-es: denied unlink of deny-set path: %{public}@", targetPath)
+            es_respond_auth_result(client, message, ES_AUTH_RESULT_DENY, false)
+            return
+        }
+
+        es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
+    }
+
+    /// F-13: Handle AUTH_RENAME — deny rename from/to deny-set paths.
+    private func handleRename(_ message: UnsafePointer<es_message_t>) {
+        guard let client = client else { return }
+        let msg = message.pointee
+        let pid = audit_token_to_pid(msg.process.pointee.audit_token)
+
+        if !DecisionEngine.shared.processTree.isSupervised(pid: pid) {
+            pendingLock.lock()
+            let isPendingAgent = unmutedAgentPIDs.contains(pid)
+            pendingLock.unlock()
+            if !isPendingAgent {
+                es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
+                return
+            }
+        }
+
+        let sourcePath = String(cString: msg.event.rename.source.pointee.path.data)
+        let engine = DecisionEngine.shared
+
+        // Check source path against deny set
+        if engine.config.isDeniedExpanded(path: sourcePath) {
+            os_log(.error, log: esLog, "tarn-es: denied rename from deny-set path: %{public}@", sourcePath)
+            es_respond_auth_result(client, message, ES_AUTH_RESULT_DENY, false)
+            return
+        }
+
+        // Check destination path against deny set.
+        // AUTH_RENAME destination is in a union — check the existing_file variant first.
+        let destType = msg.event.rename.destination_type
+        let destPath: String?
+        if destType == ES_DESTINATION_TYPE_EXISTING_FILE {
+            destPath = String(cString: msg.event.rename.destination.existing_file.pointee.path.data)
+        } else if destType == ES_DESTINATION_TYPE_NEW_PATH {
+            let dir = String(cString: msg.event.rename.destination.new_path.dir.pointee.path.data)
+            let filename = String(cString: msg.event.rename.destination.new_path.filename.data)
+            destPath = (dir as NSString).appendingPathComponent(filename)
+        } else {
+            destPath = nil
+        }
+
+        if let destPath = destPath, engine.config.isDeniedExpanded(path: destPath) {
+            os_log(.error, log: esLog, "tarn-es: denied rename to deny-set path: %{public}@", destPath)
+            es_respond_auth_result(client, message, ES_AUTH_RESULT_DENY, false)
+            return
+        }
+
+        es_respond_auth_result(client, message, ES_AUTH_RESULT_ALLOW, false)
     }
 }
 

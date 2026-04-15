@@ -68,14 +68,24 @@ final class XPCClient: NSObject {
         return result
     }
 
-    /// Register the agent's PID as the root of the supervised tree.
-    func registerAgentRoot(sessionId: String, pid: pid_t) {
+    /// Tell ES extension to watch for next fork from our PID.
+    func prepareAgentLaunch(sessionId: String) {
         guard let proxy = supervisorProxy() else { return }
-
+        let cliPID = ProcessInfo.processInfo.processIdentifier
         let semaphore = DispatchSemaphore(value: 0)
-        proxy.registerAgentRoot(sessionId, pid: pid) { error in
+        proxy.prepareAgentLaunch(sessionId, cliPID: cliPID) {
+            semaphore.signal()
+        }
+        semaphore.wait()
+    }
+
+    /// Confirm the actual agent PID after spawn.
+    func confirmAgentPID(sessionId: String, pid: pid_t) {
+        guard let proxy = supervisorProxy() else { return }
+        let semaphore = DispatchSemaphore(value: 0)
+        proxy.confirmAgentPID(sessionId, pid: pid) { error in
             if let error = error {
-                print("tarn: failed to register agent root: \(error)")
+                print("tarn: failed to confirm agent PID: \(error)")
             }
             semaphore.signal()
         }
@@ -127,6 +137,10 @@ extension XPCClient: TarnCLICallbackXPC {
         fflush(stdout)
 
         // Freeze the entire agent process group (agent + children).
+        // F-08 accepted risk: Children that called setsid() are in a
+        // different process group and will NOT be stopped by this signal.
+        // Those processes are still supervised (ProcessTree tracks them),
+        // but they can race the user's prompt decision.
         let pid = agentPid
         if pid > 0 { kill(-pid, SIGSTOP) }
 
@@ -175,7 +189,10 @@ extension XPCClient: TarnCLICallbackXPC {
             return
         }
 
-        let path = request.path.isEmpty ? profilePath : request.path
+        // F-12/G2-07: Always use CLI's own profilePath, never the path
+        // from the XPC request. Defense in depth against a compromised
+        // ES extension sending an arbitrary file path.
+        let path = profilePath
 
         do {
             var config = try Config.load(from: path)

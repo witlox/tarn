@@ -64,7 +64,10 @@ private func resolveTeamID() -> String? {
 @objc public protocol TarnSupervisorXPC {
     func startSession(_ configData: Data, reply: @escaping (Data?, NSError?) -> Void)
     func endSession(_ sessionId: String, reply: @escaping () -> Void)
-    func registerAgentRoot(_ sessionId: String, pid: Int32, reply: @escaping (NSError?) -> Void)
+    /// Called BEFORE spawn: tells ES extension to watch for next fork from cliPID.
+    func prepareAgentLaunch(_ sessionId: String, cliPID: Int32, reply: @escaping () -> Void)
+    /// Called AFTER spawn: confirms the agent PID and adds to process tree.
+    func confirmAgentPID(_ sessionId: String, pid: Int32, reply: @escaping (NSError?) -> Void)
 }
 
 /// Callbacks sent from the supervisor to the CLI (bidirectional XPC).
@@ -164,15 +167,18 @@ public struct PromptResponseMessage: Codable {
 /// ES extension, which hosts the DecisionEngine and ProcessTree.
 @objc public protocol TarnNetworkEvalXPC {
     func evaluateFlow(_ requestData: Data, reply: @escaping (Data) -> Void)
+    /// F-05: Heartbeat from NE extension to verify ES extension is alive.
+    func heartbeat(reply: @escaping (Bool) -> Void)
 }
 
 /// Callback protocol: ES extension → NE extension.
-/// Pushes supervised PID changes so the NE filter only intercepts
+/// Pushes supervised token changes so the NE filter only intercepts
 /// flows from supervised processes (same pattern as ES inverted muting).
+/// F-02: Uses audit token Data instead of bare PIDs to prevent PID reuse.
 @objc public protocol TarnNECallbackXPC {
-    func addSupervisedPID(_ pid: Int32)
-    func removeSupervisedPID(_ pid: Int32)
-    func clearSupervisedPIDs()
+    func addSupervisedToken(_ tokenData: Data)
+    func removeSupervisedToken(_ tokenData: Data)
+    func clearSupervisedTokens()
 }
 
 /// Request sent from the NE extension to the ES extension for flow evaluation.
@@ -180,11 +186,14 @@ public struct NetworkFlowRequest: Codable {
     public let pid: Int32
     public let hostname: String
     public let isUDP: Bool
+    /// F-02: Full audit token data for PID-reuse-safe comparison.
+    public let tokenData: Data?
 
-    public init(pid: Int32, hostname: String, isUDP: Bool) {
+    public init(pid: Int32, hostname: String, isUDP: Bool, tokenData: Data? = nil) {
         self.pid = pid
         self.hostname = hostname
         self.isUDP = isUDP
+        self.tokenData = tokenData
     }
 }
 

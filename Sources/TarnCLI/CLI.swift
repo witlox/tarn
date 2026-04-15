@@ -116,9 +116,19 @@ struct Run: ParsableCommand {
         // output the prompt.
         signal(SIGTTOU, SIG_IGN)
 
+        // F-01: Register BEFORE spawn so the ES extension is watching for
+        // the fork event. The ES extension watches for the next fork from
+        // our PID and unmutes the child.
+        client.prepareAgentLaunch(sessionId: session.sessionId)
+
+        // F-01: Agent starts suspended (POSIX_SPAWN_START_SUSPENDED).
+        // Confirm PID with ES extension, THEN send SIGCONT. This ensures
+        // the agent is in the process tree before it can execute.
         let agentPid = try spawnAgent(command: agentCommand, workingDirectory: expandedRepo)
         client.agentPid = agentPid
-        client.registerAgentRoot(sessionId: session.sessionId, pid: agentPid)
+        client.confirmAgentPID(sessionId: session.sessionId, pid: agentPid)
+        // F-01: Resume the suspended agent now that it is registered.
+        kill(agentPid, SIGCONT)
 
         let exitCode = waitForAgent(pid: agentPid)
         if exitCode != 0 {
@@ -153,7 +163,9 @@ func spawnAgent(command: [String], workingDirectory: String) throws -> pid_t {
     posix_spawnattr_init(&attrs)
     // Put agent in its own process group (PGID = its PID).
     // This lets us stop the entire tree with kill(-pid, SIGSTOP).
-    let flags: Int16 = Int16(POSIX_SPAWN_SETPGROUP)
+    // F-01: Start suspended so the agent cannot execute before
+    // the ES extension registers it in the process tree.
+    let flags: Int16 = Int16(POSIX_SPAWN_SETPGROUP) | Int16(0x0080) // 0x0080 = POSIX_SPAWN_START_SUSPENDED
     posix_spawnattr_setflags(&attrs, flags)
     posix_spawnattr_setpgroup(&attrs, 0)  // 0 = PGID equals child PID
     defer { posix_spawnattr_destroy(&attrs) }
@@ -195,8 +207,13 @@ func scrubbedEnvironment() -> [String: String] {
         "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
         "SSH_AUTH_SOCK",
         "NPM_TOKEN", "PYPI_TOKEN",
+        // F-21: Additional sensitive variables
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "KUBECONFIG",
+        "DOCKER_AUTH_CONFIG",
     ]
-    let sensitivePatterns = ["SECRET", "PASSWORD", "CREDENTIAL", "PRIVATE_KEY"]
+    // F-21: Added "TOKEN" to catch VAULT_TOKEN, CIRCLECI_TOKEN, etc.
+    let sensitivePatterns = ["SECRET", "PASSWORD", "CREDENTIAL", "PRIVATE_KEY", "TOKEN"]
     var env = ProcessInfo.processInfo.environment
     for key in env.keys {
         let upper = key.uppercased()

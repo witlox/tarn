@@ -18,15 +18,19 @@ public struct AccessRequest {
         self.processPath = processPath
     }
 
-    /// Session-cache key. Tilde-expanded path for files, "host:<target>" for network.
+    /// Session-cache key. Prefixed with "r:", "w:", or "n:" to separate
+    /// access modes. A read-allow must not be reused for a write (F-04).
+    /// Tilde-expanded path for files, domain for network.
     /// Normalized to lowercase so case variants hit the same entry (APFS is
     /// case-insensitive by default; DNS is case-insensitive per RFC 4343).
     public var cacheKey: String {
         switch kind {
-        case .fileRead(let path), .fileWrite(let path):
-            return NSString(string: path).expandingTildeInPath.lowercased()
+        case .fileRead(let path):
+            return "r:\(NSString(string: path).expandingTildeInPath.lowercased())"
+        case .fileWrite(let path):
+            return "w:\(NSString(string: path).expandingTildeInPath.lowercased())"
         case .networkConnect(let target):
-            return "host:\(target.lowercased())"
+            return "n:\(target.lowercased())"
         }
     }
 }
@@ -107,8 +111,9 @@ public struct Config {
             let expanded = expandPath(path).lowercased()
             // Denied paths take precedence
             if isDenied(path: expanded) { return .deny }
-            if readonlyPaths.contains(where: { expandPath($0.path).lowercased() == expanded }) ||
-               readwritePaths.contains(where: { expandPath($0.path).lowercased() == expanded }) {
+            // F-19: Directory prefix matching — allowing "~/.config/tool" also allows children.
+            if readonlyPaths.contains(where: { pathMatches(expanded, entry: expandPath($0.path).lowercased()) }) ||
+               readwritePaths.contains(where: { pathMatches(expanded, entry: expandPath($0.path).lowercased()) }) {
                 return .allow
             }
             return nil
@@ -116,11 +121,11 @@ public struct Config {
         case .fileWrite(let path):
             let expanded = expandPath(path).lowercased()
             if isDenied(path: expanded) { return .deny }
-            if readwritePaths.contains(where: { expandPath($0.path).lowercased() == expanded }) {
+            if readwritePaths.contains(where: { pathMatches(expanded, entry: expandPath($0.path).lowercased()) }) {
                 return .allow
             }
-            // Read-only paths explicitly deny writes
-            if readonlyPaths.contains(where: { expandPath($0.path).lowercased() == expanded }) {
+            // Read-only paths explicitly deny writes (F-19: including children)
+            if readonlyPaths.contains(where: { pathMatches(expanded, entry: expandPath($0.path).lowercased()) }) {
                 return .deny
             }
             return nil
@@ -129,7 +134,12 @@ public struct Config {
             let normalizedDomain = domain.lowercased()
             // Deny set checked first (INV-AC-3)
             if deniedDomains.contains(where: { $0.lowercased() == normalizedDomain }) { return .deny }
-            if allowedDomains.contains(where: { $0.domain.lowercased() == normalizedDomain }) {
+            // F-18: Domain suffix matching — "github.com" matches "api.github.com"
+            // but NOT "notgithub.com" (must match at dot boundary or exact).
+            if allowedDomains.contains(where: {
+                let allowed = $0.domain.lowercased()
+                return normalizedDomain == allowed || normalizedDomain.hasSuffix("." + allowed)
+            }) {
                 return .allow
             }
             return nil
@@ -351,6 +361,12 @@ extension Config {
             let tag = entry.learned ? " (learned)" : ""
             print("  \(entry.domain)\(tag)")
         }
+    }
+
+    /// F-19: Check if a path matches an entry exactly or as a child directory.
+    /// "~/.config/tool" matches "~/.config/tool/state.json" but NOT "~/.config/toolbox/x".
+    private func pathMatches(_ path: String, entry: String) -> Bool {
+        return path == entry || path.hasPrefix(entry + "/")
     }
 
     private func expandPath(_ path: String) -> String {

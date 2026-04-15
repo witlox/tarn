@@ -22,22 +22,22 @@ final class ESXPCService: NSObject, PromptService {
         super.init()
     }
 
-    /// Push a supervised PID to the NE extension.
-    func notifyNE(addPID pid: Int32) {
+    /// F-02: Push a supervised audit token to the NE extension.
+    func notifyNE(addToken tokenData: Data) {
         guard let proxy = neConnection?.remoteObjectProxy as? TarnNECallbackXPC else { return }
-        proxy.addSupervisedPID(pid)
+        proxy.addSupervisedToken(tokenData)
     }
 
-    /// Remove a supervised PID from the NE extension.
-    func notifyNE(removePID pid: Int32) {
+    /// F-02: Remove a supervised audit token from the NE extension.
+    func notifyNE(removeToken tokenData: Data) {
         guard let proxy = neConnection?.remoteObjectProxy as? TarnNECallbackXPC else { return }
-        proxy.removeSupervisedPID(pid)
+        proxy.removeSupervisedToken(tokenData)
     }
 
-    /// Clear all supervised PIDs in the NE extension.
+    /// Clear all supervised tokens in the NE extension.
     func notifyNEClearAll() {
         guard let proxy = neConnection?.remoteObjectProxy as? TarnNECallbackXPC else { return }
-        proxy.clearSupervisedPIDs()
+        proxy.clearSupervisedTokens()
     }
 
     func start() {
@@ -139,13 +139,12 @@ private final class UnifiedListenerDelegate: NSObject, NSXPCListenerDelegate {
             return false
         }
 
-        // Determine connection type: the NE extension runs as root (uid 0),
-        // the CLI runs as the user. Use this to distinguish.
-        let isNEExtension = connection.effectiveUserIdentifier == 0
-            && connection.processIdentifier != getpid()
+        // F-16: Determine connection type by code signing identifier, not UID.
+        // The NE extension has bundle ID containing "com.witlox.tarn.supervisor".
+        let isNEExtension = peerSigningIdentifier(connection)?.contains("com.witlox.tarn.supervisor") ?? false
 
         if isNEExtension {
-            // NE extension: flow evaluation + PID callbacks (bidirectional)
+            // NE extension: flow evaluation + token callbacks (bidirectional)
             connection.exportedInterface = NSXPCInterface(with: TarnNetworkEvalXPC.self)
             connection.exportedObject = service
             connection.remoteObjectInterface = NSXPCInterface(with: TarnNECallbackXPC.self)
@@ -157,6 +156,11 @@ private final class UnifiedListenerDelegate: NSObject, NSXPCListenerDelegate {
             service.neConnection = connection
             NSLog("tarn-es: NE extension connected (pid %d)", connection.processIdentifier)
         } else {
+            // F-09: Reject if a CLI connection is already active.
+            if service.cliConnection != nil {
+                NSLog("tarn-es: rejecting second CLI connection (pid %d) — session already active", connection.processIdentifier)
+                return false
+            }
             // CLI: session management + bidirectional prompts
             connection.exportedInterface = NSXPCInterface(with: TarnSupervisorXPC.self)
             connection.exportedObject = service
@@ -166,6 +170,8 @@ private final class UnifiedListenerDelegate: NSObject, NSXPCListenerDelegate {
                 if connection === service.cliConnection {
                     service.cliConnection = nil
                     service.currentProfilePath = nil
+                    // F-11: Clear pending state on CLI disconnect.
+                    ESClient.shared.clearPendingState()
                     DecisionEngine.shared.sessionCache.clear()
                     DecisionEngine.shared.processTree.removeAll()
                     DecisionEngine.shared.configure(config: Config.defaults(), repoPath: "")
@@ -179,6 +185,22 @@ private final class UnifiedListenerDelegate: NSObject, NSXPCListenerDelegate {
         }
 
         return true
+    }
+
+    /// F-16: Extract the code signing identifier from a peer connection.
+    private func peerSigningIdentifier(_ connection: NSXPCConnection) -> String? {
+        let peerPID = connection.processIdentifier
+        var peerDynCode: SecCode?
+        let pidAttrs: [String: Any] = [kSecGuestAttributePid as String: peerPID]
+        guard SecCodeCopyGuestWithAttributes(nil, pidAttrs as CFDictionary, [], &peerDynCode) == errSecSuccess,
+              let dynPeer = peerDynCode else { return nil }
+        var peerStaticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(dynPeer, [], &peerStaticCode) == errSecSuccess,
+              let peer = peerStaticCode else { return nil }
+        var peerInfo: CFDictionary?
+        guard SecCodeCopySigningInformation(peer, SecCSFlags(rawValue: kSecCSSigningInformation), &peerInfo) == errSecSuccess,
+              let peerDict = peerInfo as? [String: Any] else { return nil }
+        return peerDict[kSecCodeInfoIdentifier as String] as? String
     }
 }
 
@@ -215,8 +237,10 @@ extension NSXPCListenerDelegate {
         }
 
         guard let peerTeam = peerDict[kSecCodeInfoTeamIdentifier as String] as? String else {
-            NSLog("tarn-es: allowing connection from unsigned/Apple peer (PID %d)", peerPID)
-            return true
+            // F-03: Reject connections from unsigned/Apple peers.
+            // No legitimate reason for an unsigned process to connect.
+            NSLog("tarn-es: rejecting connection from unsigned/Apple peer (PID %d)", peerPID)
+            return false
         }
 
         return selfTeam == peerTeam
@@ -232,12 +256,14 @@ extension ESXPCService: TarnSupervisorXPC {
             return
         }
 
-        // F4/F27: Validate repoPath
+        // F4/F27: Validate and canonicalize repoPath
         let fm = FileManager.default
         var isDir: ObjCBool = false
-        guard request.repoPath.hasPrefix("/"),
-              request.repoPath != "/",
-              fm.fileExists(atPath: request.repoPath, isDirectory: &isDir),
+        // F-27: Canonicalize to resolve ".." components
+        let canonicalRepoPath = URL(fileURLWithPath: request.repoPath).standardizedFileURL.path
+        guard canonicalRepoPath.hasPrefix("/"),
+              canonicalRepoPath != "/",
+              fm.fileExists(atPath: canonicalRepoPath, isDirectory: &isDir),
               isDir.boolValue else {
             reply(nil, NSError(domain: "tarn", code: 4,
                                userInfo: [NSLocalizedDescriptionKey:
@@ -258,7 +284,7 @@ extension ESXPCService: TarnSupervisorXPC {
             let agentProfile = AgentProfile.from(name: request.agent)
             let stackProfiles: [StackProfile]
             if request.stacks.isEmpty {
-                stackProfiles = ProfileResolver.detectStack(repoPath: request.repoPath)
+                stackProfiles = ProfileResolver.detectStack(repoPath: canonicalRepoPath)
             } else {
                 stackProfiles = StackProfile.parse(request.stacks.joined(separator: ","))
             }
@@ -270,10 +296,12 @@ extension ESXPCService: TarnSupervisorXPC {
             config.expandAllPaths(userHome: request.userHome)
 
             let secProfile = agentProfile.profile
-            let agentPaths = (secProfile.readonlyPaths + secProfile.readwritePaths).map { path in
+            let expandHome: (String) -> String = { path in
                 path.hasPrefix("~/") ? request.userHome + path.dropFirst(1) : path
             }
-            DecisionEngine.shared.configure(config: config, repoPath: request.repoPath, agentPaths: agentPaths)
+            let agentReadPaths = secProfile.readonlyPaths.map(expandHome)
+            let agentWritePaths = secProfile.readwritePaths.map(expandHome)
+            DecisionEngine.shared.configure(config: config, repoPath: canonicalRepoPath, agentPaths: agentReadPaths, agentWritePaths: agentWritePaths)
             currentProfilePath = request.profilePath
 
             let response = SessionStartResponse(
@@ -290,21 +318,28 @@ extension ESXPCService: TarnSupervisorXPC {
     }
 
     func endSession(_ sessionId: String, reply: @escaping () -> Void) {
-        DecisionEngine.shared.sessionCache.clear()
-        DecisionEngine.shared.processTree.removeAll()
+        // F-11: Clear pending agent state to prevent stale entries.
+        ESClient.shared.clearPendingState()
+        // G2-06: Clear pendingPrompts to prevent cross-session cache leak.
+        DecisionEngine.shared.configure(config: Config.defaults(), repoPath: "")
+        ESXPCService.shared.notifyNEClearAll()
+        currentProfilePath = nil
         reply()
     }
 
-    func registerAgentRoot(_ sessionId: String, pid: Int32, reply: @escaping (NSError?) -> Void) {
+    func prepareAgentLaunch(_ sessionId: String, cliPID: Int32, reply: @escaping () -> Void) {
+        ESClient.shared.watchForAgentFork(cliPID: cliPID)
+        reply()
+    }
+
+    func confirmAgentPID(_ sessionId: String, pid: Int32, reply: @escaping (NSError?) -> Void) {
         guard pid > 0, kill(pid, 0) == 0 else {
             let msg = "PID \(pid) does not exist or is invalid"
-            NSLog("tarn-es: rejecting registerAgentRoot — %@", msg)
+            NSLog("tarn-es: rejecting confirmAgentPID — %@", msg)
             reply(NSError(domain: "tarn", code: 3, userInfo: [NSLocalizedDescriptionKey: msg]))
             return
         }
-        ESClient.shared.registerAgentPID(pid)
-        // Push to NE extension so it only intercepts this PID's flows
-        ESXPCService.shared.notifyNE(addPID: pid)
+        ESClient.shared.confirmAgentPID(pid)
         reply(nil)
     }
 }
@@ -312,11 +347,18 @@ extension ESXPCService: TarnSupervisorXPC {
 // MARK: - Network Eval XPC Protocol (from NE extension)
 
 extension ESXPCService: TarnNetworkEvalXPC {
+    /// F-05: Heartbeat endpoint for NE extension health checking.
+    func heartbeat(reply: @escaping (Bool) -> Void) {
+        reply(true)
+    }
+
     func evaluateFlow(_ requestData: Data, reply: @escaping (Data) -> Void) {
         guard let request = try? JSONDecoder().decode(NetworkFlowRequest.self, from: requestData) else {
-            // Can't decode → fail-open
-            let allow = NetworkFlowResponse(action: "allow")
-            reply((try? JSONEncoder().encode(allow)) ?? Data())
+            // I-01: Can't decode → deny. Only the NE extension sends these,
+            // so a malformed request is suspicious. Fail-closed here is safe
+            // because the NE extension's own error paths already fail-open.
+            let deny = NetworkFlowResponse(action: "deny")
+            reply((try? JSONEncoder().encode(deny)) ?? Data())
             return
         }
 

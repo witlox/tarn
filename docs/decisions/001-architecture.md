@@ -11,7 +11,7 @@ AI coding agents require sandboxing to prevent accidental or prompt-injection-dr
 
 ### 1. Endpoint Security plus Network Extension over VM + seccomp-notify
 
-**Decision:** Use Apple's Endpoint Security framework for file and process supervision, and the Network Extension content filter (`NEFilterDataProvider`) for network supervision. Both run inside a single macOS system extension hosted by the tarn `.app` bundle.
+**Decision:** Use Apple's Endpoint Security framework for file and process supervision, and the Network Extension content filter (`NEFilterDataProvider`) for network supervision. ~~Both run inside a single macOS system extension hosted by the tarn `.app` bundle.~~ **Revised:** These now run in two separate system extensions (TarnES for ES, TarnSupervisor for NE) within the same `.app` bundle. See [ADR-005](005-two-extension-split.md) for the rationale.
 
 **Rationale:** ES provides pre-execution AUTH notifications for file operations — the same interception model as seccomp-notify, but native to macOS, with richer context (full paths, process executable, code signing info) and no Linux VM kernel. The Network Extension content filter provides the equivalent for outbound network flows, with the same identity primitive (the BSM audit token) so the supervised process tree maintained from ES NOTIFY events is the same set of identities the NE filter checks. Together they cover everything tarn needs without a guest OS, vsock, or seccomp.
 
@@ -68,3 +68,17 @@ The earlier version of this ADR proposed "single Swift binary." That framing was
 - ES AUTH events have a sub-second system-imposed response deadline — file-side decisions must be fast and rely on aggressive session caching
 - Network flows have a much more forgiving deadline (TCP indefinite, UDP ~10s) — interactive prompts on the network side are timing-safe
 - Tarn conflicts with other content filters (Little Snitch 5+, LuLu, Radio Silence). It coexists with DNS-level filters (AdGuard, NextDNS, Pi-hole) because they occupy a different Network Extension provider slot
+
+## Revision: Two-Extension Split (April 2026)
+
+The original text of Decision 1 stated that ES and NE would run "inside a single macOS system extension." During implementation, we discovered that macOS returns `ERR_NOT_PERMITTED` when `es_new_client` is called from within a Network Extension provider process — the NE sandbox profile blocks the ES entitlement check at the kernel level. This is undocumented but consistent across macOS 14 and 15.
+
+The architecture was revised to use two system extensions bundled in the same `.app`:
+
+- **TarnES** (`com.witlox.tarn.es`) — Endpoint Security extension. Hosts ESClient, DecisionEngine, ProcessTree, SessionCache, and ESXPCService.
+- **TarnSupervisor** (`com.witlox.tarn.supervisor`) — Network Extension extension. Hosts NEFilterDataProvider and ESBridgeClient. Stateless proxy that forwards flows to TarnES for evaluation.
+
+The core rationale of this ADR (ES + NE over VM, interactive prompt-and-learn, process tree scoping, global whitelist) is unchanged. Only the single-extension deployment shape was revised.
+
+Full rationale and consequences: [ADR-005: Two-Extension Split](005-two-extension-split.md).
+Additionally, [ADR-006: ES Per-Event Muting Strategy](006-es-muting-strategy.md) documents the per-event muting and suspended-spawn approach used by TarnES.

@@ -1,8 +1,10 @@
 Feature: Profile Composition
   Tarn uses composable security profiles layered as:
-  base → stack(s) → agent → user TOML → session cache.
+  base -> stack(s) -> agent -> user TOML -> session cache.
   Later layers extend but never remove earlier layers.
   Denied paths take precedence over all allow rules.
+
+  # Base profile
 
   Scenario: Base profile provides system paths
     Given the base-macos profile is loaded
@@ -15,12 +17,17 @@ Feature: Profile Composition
     Then denied paths should include "~/.aws"
     And denied paths should include "~/.gnupg"
     And denied paths should include patterns matching "~/.ssh/id_*"
+    And denied paths should include "~/.kube/config"
+    And denied paths should include "~/.docker/config.json"
+    And denied paths should include "~/.netrc"
 
   Scenario: Denied paths block reads even if whitelisted elsewhere
     Given the base-macos profile denies "~/.aws"
     And a user profile grants read access to "~/.aws/config"
     When a supervised process reads "~/.aws/config"
     Then the check should return deny
+
+  # Stack detection
 
   Scenario: Node stack is auto-detected from package.json
     Given the repo contains "package.json"
@@ -33,6 +40,22 @@ Feature: Profile Composition
     When stack detection runs
     Then the stack-rust profile should be activated
     And allowed domains should include "crates.io"
+
+  Scenario: Python stack is auto-detected from pyproject.toml
+    Given the repo contains "pyproject.toml"
+    When stack detection runs
+    Then the stack-python profile should be activated
+    And allowed domains should include "pypi.org"
+
+  Scenario: Go stack is auto-detected from go.mod
+    Given the repo contains "go.mod"
+    When stack detection runs
+    Then the stack-go profile should be activated
+
+  Scenario: Xcode stack is auto-detected from Package.swift
+    Given the repo contains "Package.swift"
+    When stack detection runs
+    Then the stack-xcode profile should be activated
 
   Scenario: Multiple stacks detected simultaneously
     Given the repo contains "package.json" and "pyproject.toml"
@@ -54,6 +77,8 @@ Feature: Profile Composition
     Then stacks node and rust should be active
     And no error should be raised
 
+  # Agent profiles
+
   Scenario: Claude agent profile includes Anthropic API
     Given the agent is "claude"
     When profiles are composed
@@ -65,11 +90,18 @@ Feature: Profile Composition
     When profiles are composed
     Then allowed domains should include "api.openai.com"
 
+  Scenario: Gemini agent profile includes Google API
+    Given the agent is "gemini"
+    When profiles are composed
+    Then allowed domains should include "generativelanguage.googleapis.com"
+
   Scenario: Custom agent gets minimal profile
     Given the agent is "my-custom-agent"
     When profiles are composed
     Then the agent profile should be "agent-custom"
     And no agent-specific domains should be added
+
+  # Profile composition
 
   Scenario: User TOML entries layer on top of profiles
     Given the base profile and stack-node are active
@@ -85,7 +117,7 @@ Feature: Profile Composition
     Then "/usr" should appear exactly once in read-only paths
 
   Scenario: Session summary displays active profiles
-    When I run "sudo tarn run /tmp/myrepo --agent claude"
+    When the CLI starts a session with agent "claude"
     Then the output should show the agent name and profile
     And the output should show detected or explicit stacks
     And the output should show entry counts for allow and deny rules

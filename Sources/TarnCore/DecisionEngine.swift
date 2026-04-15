@@ -16,6 +16,7 @@ public final class DecisionEngine {
     private var _config = Config.defaults()
     private var _repoPath: String = ""
     private var _agentPaths: [String] = []
+    private var _agentWritePaths: [String] = []
     private let configLock = NSLock()
 
     /// Tracks in-flight prompt cache keys and waiting callbacks.
@@ -54,12 +55,20 @@ public final class DecisionEngine {
         return _agentPaths
     }
 
+    public var agentWritePaths: [String] {
+        configLock.lock()
+        defer { configLock.unlock() }
+        return _agentWritePaths
+    }
+
     /// Configure the engine for a new session. Clears all prior state.
-    public func configure(config: Config, repoPath: String, agentPaths: [String] = []) {
+    /// F-17: agentPaths are readonly, agentWritePaths allow both reads and writes.
+    public func configure(config: Config, repoPath: String, agentPaths: [String] = [], agentWritePaths: [String] = []) {
         configLock.lock()
         _config = config
         _repoPath = repoPath
         _agentPaths = agentPaths
+        _agentWritePaths = agentWritePaths
         configLock.unlock()
         sessionCache.clear()
         processTree.removeAll()
@@ -180,8 +189,9 @@ public final class DecisionEngine {
     }
 
     /// Check if a path is in a trusted region.
+    /// F-17: agentPaths are readonly, agentWritePaths allow both.
     public func isInTrustedRegion(path: String, isWrite: Bool) -> Bool {
-        TrustedRegions.isTrusted(path: path, repoPath: repoPath, agentPaths: agentPaths, isWrite: isWrite)
+        TrustedRegions.isTrusted(path: path, repoPath: repoPath, agentPaths: agentPaths, agentWritePaths: agentWritePaths, isWrite: isWrite)
     }
 
     public func makePromptMessage(request: AccessRequest) -> PromptRequestMessage {

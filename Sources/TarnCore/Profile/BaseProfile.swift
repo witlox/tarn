@@ -52,5 +52,8 @@ public struct BaseProfile: SecurityProfile {
         "~/Library/Keychains",
         "~/Library/Cookies",
         "~/Library/Safari",
+        "~/.config/op",
+        "~/.password-store",
+        "~/Library/Application Support/Firefox/Profiles",
     ]
 }
